@@ -1,0 +1,1 @@
+// Toolbar removed: actions moved into ColorPalette.

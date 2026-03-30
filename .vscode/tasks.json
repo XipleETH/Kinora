@@ -1,0 +1,17 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "install aws-sdk client in twelve-fps",
+			"type": "shell",
+			"command": "npm",
+			"args": [
+				"install"
+			],
+			"problemMatcher": [
+				"$tsc"
+			],
+			"group": "build"
+		}
+	]
+}
