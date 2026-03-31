@@ -1,17 +1,6 @@
 import express from 'express';
-import { S3Client, PutObjectCommand, GetObjectCommand, DeleteObjectCommand } from '@aws-sdk/client-s3';
 import { InitResponse, IncrementResponse, DecrementResponse } from '../shared/types/api';
-// Register Devvit app-level settings so the CLI can discover them (required for `devvit settings set`)
-import { Devvit, SettingScope } from '@devvit/public-api';
-Devvit.addSettings([
-  { type: 'string', name: 'R2_ENABLED', label: 'Enable R2 (1/0 or true/false)', scope: SettingScope.App, isSecret: false },
-  { type: 'string', name: 'R2_BUCKET', label: 'R2 Bucket', scope: SettingScope.App, isSecret: false },
-  { type: 'string', name: 'R2_ENDPOINT', label: 'R2 Endpoint (S3-compatible)', scope: SettingScope.App, isSecret: false },
-  { type: 'string', name: 'R2_ACCESS_KEY_ID', label: 'R2 Access Key ID', scope: SettingScope.App, isSecret: true },
-  { type: 'string', name: 'R2_SECRET_ACCESS_KEY', label: 'R2 Secret Access Key', scope: SettingScope.App, isSecret: true },
-  { type: 'string', name: 'R2_PUBLIC_BASE_URL', label: 'Public CDN/Base URL (optional)', scope: SettingScope.App, isSecret: false },
-]);
-import { redis, reddit, createServer, context, getServerPort } from '@devvit/web/server';
+import { redis, reddit, createServer, context, getServerPort, media } from '@devvit/web/server';
 import { createPost } from './core/post';
 import crypto from 'node:crypto';
 
@@ -129,121 +118,22 @@ async function computeWeekForTimestamp(ts:number):Promise<number>{
 
 const router = express.Router();
 
-// --- Optional R2/S3 storage configuration ---
-function getSettingOrEnv(key: string): string {
+// --- Reddit Media API storage ---
+// Uploads a base64 data URL to Reddit's CDN via the native media.upload() API.
+// Returns the permanent i.redd.it URL, or null on failure.
+async function uploadToRedditCDN(dataUrl: string): Promise<string | null> {
   try {
-    const fromCtx = (context as any)?.appSettings?.[key];
-    if (typeof fromCtx === 'string' && fromCtx.trim()) return fromCtx.trim();
-  } catch {}
-  return process.env[key] || '';
-}
-type R2Config = {
-  enabled: boolean;
-  bucket: string;
-  endpoint: string;
-  accessKeyId: string;
-  secretAccessKey: string;
-  publicBaseUrl: string;
-};
-
-// Redis-backed config keys (allow setting in production without Devvit app settings)
-const R2_CFG_KEY = (name: string) => `config:r2:${name}`;
-
-async function loadR2ConfigFromRedis(): Promise<Partial<R2Config>> {
-  const [enabled, bucket, endpoint, ak, sk, pub] = await Promise.all([
-    redis.get(R2_CFG_KEY('enabled')),
-    redis.get(R2_CFG_KEY('bucket')),
-    redis.get(R2_CFG_KEY('endpoint')),
-    redis.get(R2_CFG_KEY('accessKeyId')),
-    redis.get(R2_CFG_KEY('secretAccessKey')),
-    redis.get(R2_CFG_KEY('publicBaseUrl')),
-  ]);
-  const out: Partial<R2Config> = {};
-  if (enabled != null) out.enabled = enabled === '1' || enabled.toLowerCase() === 'true';
-  if (bucket) out.bucket = bucket;
-  if (endpoint) out.endpoint = endpoint;
-  if (ak) out.accessKeyId = ak;
-  if (sk) out.secretAccessKey = sk;
-  if (pub) out.publicBaseUrl = pub;
-  return out;
-}
-
-function loadR2ConfigFromEnv(): R2Config {
-  const v = getSettingOrEnv('R2_ENABLED');
-  return {
-    enabled: v === '1' || v.toLowerCase?.() === 'true',
-    bucket: getSettingOrEnv('R2_BUCKET'),
-    endpoint: getSettingOrEnv('R2_ENDPOINT'),
-    accessKeyId: getSettingOrEnv('R2_ACCESS_KEY_ID') || getSettingOrEnv('AWS_ACCESS_KEY_ID'),
-    secretAccessKey: getSettingOrEnv('R2_SECRET_ACCESS_KEY') || getSettingOrEnv('AWS_SECRET_ACCESS_KEY'),
-    publicBaseUrl: getSettingOrEnv('R2_PUBLIC_BASE_URL'),
-  };
-}
-
-let currentR2Config: R2Config = loadR2ConfigFromEnv();
-let s3Client: S3Client | null = null;
-
-async function ensureS3Client(): Promise<void> {
-  // Load redis overrides if present
-  const fromRedis = await loadR2ConfigFromRedis();
-  const merged: R2Config = {
-    ...currentR2Config,
-    ...fromRedis,
-  } as R2Config;
-  const changed = JSON.stringify(merged) !== JSON.stringify(currentR2Config);
-  currentR2Config = merged;
-  if (!currentR2Config.enabled) { s3Client = null; return; }
-  if (!currentR2Config.bucket || !currentR2Config.endpoint || !currentR2Config.accessKeyId || !currentR2Config.secretAccessKey) { s3Client = null; return; }
-  if (s3Client && !changed) return;
-  try {
-    s3Client = new S3Client({
-      region: 'auto',
-      endpoint: currentR2Config.endpoint,
-      forcePathStyle: true, // Cloudflare R2 requires path-style addressing
-      credentials: { accessKeyId: currentR2Config.accessKeyId, secretAccessKey: currentR2Config.secretAccessKey },
-    });
-    console.log('[storage] R2/S3 client configured for bucket', currentR2Config.bucket);
+    const result = await media.upload({ url: dataUrl, type: 'image' });
+    console.log('[media] uploaded to Reddit CDN:', result.mediaUrl);
+    return result.mediaUrl;
   } catch (e: any) {
-    console.warn('[storage] failed to init R2/S3 client:', e?.message);
-    s3Client = null;
-  }
-}
-
-async function r2PutPng(key: string, buf: Buffer) {
-  await ensureS3Client();
-  if (!s3Client) return false;
-  try {
-    await s3Client.send(new PutObjectCommand({ Bucket: currentR2Config.bucket, Key: key, Body: buf, ContentType: 'image/png', CacheControl: 'public, max-age=31536000, immutable' }));
-    return true;
-  } catch (e: any) {
-    console.error('[storage] put failed', key, e?.message);
-    return false;
-  }
-}
-
-async function r2GetObject(key: string) {
-  await ensureS3Client();
-  if (!s3Client) return null;
-  try {
-    const out = await s3Client.send(new GetObjectCommand({ Bucket: currentR2Config.bucket, Key: key }));
-    return out;
-  } catch (e: any) {
-    console.error('[storage] get failed', key, e?.message);
+    console.error('[media] upload failed:', e?.message);
     return null;
   }
 }
 
-async function r2DeleteObject(key: string) {
-  await ensureS3Client();
-  if (!s3Client) return false;
-  try {
-    await s3Client.send(new DeleteObjectCommand({ Bucket: currentR2Config.bucket, Key: key }));
-    return true;
-  } catch (e: any) {
-    console.warn('[storage] delete failed', key, e?.message);
-    return false;
-  }
-}
+// Helper to store pending frame data URL separately from turn state (avoids JSON bloat)
+const PENDING_FRAME_DATA_KEY = (postId: string) => `pending:frame:data:${postId}`;
 
 router.get<{ postId: string }, InitResponse | { status: string; message: string }>(
   '/api/init',
@@ -349,7 +239,7 @@ interface TurnState {
   windowStart: number; // ms
   windowEnd: number;   // ms
   started: boolean;
-  pendingFrame?: { dataUrl: string; updated: number } | null;
+  hasPendingFrame?: boolean; // flag only; actual data stored in separate Redis key
 }
 
 const TWO_HOURS_MS = 2 * 60 * 60 * 1000;
@@ -375,7 +265,7 @@ async function loadTurn(): Promise<TurnState> {
 
 async function resetTurnWindow(): Promise<TurnState> {
   // Idle state: no active artist and no ticking window
-  const state: TurnState = { currentArtist: null, windowStart: 0, windowEnd: 0, started: false, pendingFrame: null };
+  const state: TurnState = { currentArtist: null, windowStart: 0, windowEnd: 0, started: false, hasPendingFrame: false };
   await redis.set(TURN_KEY, JSON.stringify(state));
   return state;
 }
@@ -455,12 +345,22 @@ router.post('/api/turn', async (_req, res) => {
   }
 });
 
-// Pending frame endpoints (local storage per window)
+// Pending frame endpoints (data stored separately from turn state to avoid JSON bloat)
 router.get('/api/pending-frame', async (_req, res) => {
   try {
+    const { postId } = context;
+    if (!postId) return res.json({ pending: null });
     const state = await loadTurn();
-    if (state.pendingFrame) {
-      return res.json({ pending: { url: state.pendingFrame.dataUrl, lastModified: state.pendingFrame.updated } });
+    if (state.hasPendingFrame) {
+      const raw = await redis.get(PENDING_FRAME_DATA_KEY(postId));
+      if (raw) {
+        try {
+          const data = JSON.parse(raw);
+          // data may have mediaUrl (uploaded to Reddit CDN) or dataUrl (legacy/fallback)
+          const url = data.mediaUrl || data.dataUrl || '';
+          return res.json({ pending: { url, lastModified: data.updated } });
+        } catch {}
+      }
     }
     res.json({ pending: null });
   } catch(e:any) {
@@ -471,6 +371,8 @@ router.get('/api/pending-frame', async (_req, res) => {
 
 router.post('/api/pending-frame', async (req, res) => {
   try {
+    const { postId } = context;
+    if (!postId) return res.status(400).json({ error: 'post not found' });
     // Resolve identity from Reddit (preferred) or client-provided fallback header/body
     const resolveUser = async (): Promise<string> => {
       try {
@@ -486,9 +388,21 @@ router.post('/api/pending-frame', async (req, res) => {
     if (username !== state.currentArtist) return res.status(403).json({ error: 'not artist' });
     const { dataUrl } = req.body || {};
     if (typeof dataUrl !== 'string' || !dataUrl.startsWith('data:image/png')) return res.status(400).json({ error: 'invalid dataUrl' });
-    state.pendingFrame = { dataUrl, updated: Date.now() };
+    // Upload to Reddit CDN IMMEDIATELY (avoids storing huge data URL in Redis)
+    console.log('[pending:post] uploading to Reddit CDN...', dataUrl.length, 'chars');
+    const mediaUrl = await uploadToRedditCDN(dataUrl);
+    if (mediaUrl) {
+      console.log('[pending:post] uploaded successfully:', mediaUrl);
+      // Store only the small URL string in Redis (not the huge data URL)
+      await redis.set(PENDING_FRAME_DATA_KEY(postId), JSON.stringify({ mediaUrl, updated: Date.now() }));
+    } else {
+      console.warn('[pending:post] CDN upload failed, storing dataUrl in Redis as fallback');
+      // Fallback: store data URL directly (may fail for large images)
+      await redis.set(PENDING_FRAME_DATA_KEY(postId), JSON.stringify({ dataUrl, updated: Date.now() }));
+    }
+    state.hasPendingFrame = true;
     await saveTurn(state);
-    res.json({ ok: true });
+    res.json({ ok: true, storage: mediaUrl ? 'reddit' : 'redis' });
   } catch(e:any) {
     console.error('[pending:post] error', e?.message);
     res.status(500).json({ error: 'pending store failed' });
@@ -497,9 +411,14 @@ router.post('/api/pending-frame', async (req, res) => {
 
 router.delete('/api/pending-frame', async (_req, res) => {
   try {
+    const { postId } = context;
     let state = await loadTurn();
-    state.pendingFrame = null;
+    state.hasPendingFrame = false;
     await saveTurn(state);
+    // Clean up separate data key
+    if (postId) {
+      try { await redis.set(PENDING_FRAME_DATA_KEY(postId), ''); } catch {}
+    }
     res.json({ ok: true });
   } catch(e:any) {
     console.error('[pending:delete] error', e?.message);
@@ -514,41 +433,52 @@ router.post('/api/finalize-turn', async (_req, res) => {
     const { postId } = context;
     if (!postId) return res.status(400).json({ error: 'post not found' });
     // Persist pending frame if present
-  if (state.pendingFrame && state.currentArtist) {
-      // Ensure week anchor/current week exist before computing week for timestamp
-      await ensureCurrentWeek();
-      const ts = await nowMs();
-      const week = await computeWeekForTimestamp(ts);
-      const key = `frames/week-${week}/${ts.toString(36)}.png`;
-      const dataUrl = state.pendingFrame.dataUrl;
-      let stored: StoredFrame;
-      // Try R2 first if configured
-  await ensureS3Client();
-  if (currentR2Config.enabled && s3Client) {
+    if (state.hasPendingFrame && state.currentArtist) {
+      // Load pending data from separate Redis key (should contain mediaUrl from CDN upload)
+      const pendingRaw = await redis.get(PENDING_FRAME_DATA_KEY(postId));
+      let mediaUrl: string | null = null;
+      let dataUrl: string | null = null;
+      if (pendingRaw) {
         try {
-          const parts = typeof dataUrl === 'string' ? dataUrl.split(',') : [];
-          const base64: string = parts.length > 1 ? String(parts[1] || '') : '';
-          const buf = Buffer.from(base64, 'base64');
-          const ok = await r2PutPng(key, buf);
-          if (ok) {
-            stored = { key, timestamp: ts, artist: state.currentArtist, week, storage: 'r2', size: buf.byteLength, contentType: 'image/png' };
+          const pd = JSON.parse(pendingRaw);
+          mediaUrl = pd.mediaUrl || null;
+          dataUrl = pd.dataUrl || null;
+        } catch {}
+      }
+      const hasContent = !!(mediaUrl || dataUrl);
+      if (hasContent) {
+        // Ensure week anchor/current week exist before computing week for timestamp
+        await ensureCurrentWeek();
+        const ts = await nowMs();
+        const week = await computeWeekForTimestamp(ts);
+        const key = `frames/week-${week}/${ts.toString(36)}.png`;
+        let stored: StoredFrame;
+        if (mediaUrl) {
+          // Already uploaded to Reddit CDN during pending-frame save
+          console.log('[finalize-turn] using pre-uploaded CDN URL:', mediaUrl);
+          stored = { key, mediaUrl, timestamp: ts, artist: state.currentArtist, week, storage: 'reddit', contentType: 'image/png' };
+        } else if (dataUrl) {
+          // Legacy fallback: try uploading now
+          console.log('[finalize-turn] attempting CDN upload from dataUrl fallback...');
+          const url = await uploadToRedditCDN(dataUrl);
+          if (url) {
+            stored = { key, mediaUrl: url, timestamp: ts, artist: state.currentArtist, week, storage: 'reddit', contentType: 'image/png' };
           } else {
-            // Fallback to redis if upload failed
             stored = { key, dataUrl, timestamp: ts, artist: state.currentArtist, week, storage: 'redis' };
           }
-        } catch {
-          stored = { key, dataUrl, timestamp: ts, artist: state.currentArtist, week, storage: 'redis' };
+        } else {
+          stored = { key, timestamp: ts, artist: state.currentArtist, week, storage: 'redis' };
         }
-      } else {
-        // Redis-only mode
-        stored = { key, dataUrl, timestamp: ts, artist: state.currentArtist, week, storage: 'redis' };
+        await redis.set(`frames:data:${postId}:${key}`, JSON.stringify(stored));
+        // update list
+        const frameKeysStr = await redis.get(`frames:list:${postId}`);
+        const frameKeys: string[] = frameKeysStr ? JSON.parse(frameKeysStr) : [];
+        frameKeys.push(key);
+        await redis.set(`frames:list:${postId}`, JSON.stringify(frameKeys));
+        console.log('[finalize-turn] frame stored:', key, 'storage:', stored.storage);
       }
-      await redis.set(`frames:data:${postId}:${key}`, JSON.stringify(stored));
-      // update list
-      const frameKeysStr = await redis.get(`frames:list:${postId}`);
-      const frameKeys: string[] = frameKeysStr ? JSON.parse(frameKeysStr) : [];
-      frameKeys.push(key);
-      await redis.set(`frames:list:${postId}`, JSON.stringify(frameKeys));
+      // Clean up pending data key
+      try { await redis.set(PENDING_FRAME_DATA_KEY(postId), ''); } catch {}
     }
     // Reset window so Start Turn is available immediately
     state = await resetTurnWindow();
@@ -565,13 +495,13 @@ router.post('/api/finalize-turn', async (_req, res) => {
 // --- Redis-based persistent storage for frames (shared across all users) ---
 interface StoredFrame {
   key: string;
-  // When using Redis-only, dataUrl stores the PNG (legacy). With R2 enabled, omit dataUrl and use storage:'r2'.
-  dataUrl?: string;
+  mediaUrl?: string;    // Reddit CDN URL (i.redd.it/...) — new primary storage
+  dataUrl?: string;     // Legacy: base64 data URL (redis-only fallback)
   timestamp: number;
   artist: string;
   week?: number;
   status?: string; // 'active' | 'flagged'
-  storage?: 'redis' | 'r2';
+  storage?: 'redis' | 'r2' | 'reddit';  // 'reddit' = Reddit CDN via media.upload
   size?: number; // bytes
   contentType?: string; // e.g., image/png
 }
@@ -656,9 +586,13 @@ router.get('/api/list-frames', async (req, res) => {
           }
         }
         if (filterWeek && week !== filterWeek) continue;
-        const publicSrc = (frameData.storage === 'r2' && currentR2Config.publicBaseUrl)
-          ? `${currentR2Config.publicBaseUrl.replace(/\/$/,'')}/${encodeURIComponent(frameData.key)}`
-          : `/api/frame/${encodeURIComponent(frameData.key)}`;
+        // Determine public src: Reddit CDN URL > legacy proxy path
+        let publicSrc: string;
+        if (frameData.storage === 'reddit' && frameData.mediaUrl) {
+          publicSrc = frameData.mediaUrl;
+        } else {
+          publicSrc = `/api/frame/${encodeURIComponent(frameData.key)}`;
+        }
         const frameOut = {
           key: frameData.key,
           lastModified: frameData.timestamp,
@@ -668,7 +602,7 @@ router.get('/api/list-frames', async (req, res) => {
           votesDown,
           myVote,
           src: publicSrc,
-          url: (metaOnly || frameData.storage === 'r2') ? undefined : frameData.dataUrl
+          url: (metaOnly || frameData.storage === 'reddit' || frameData.storage === 'r2') ? undefined : frameData.dataUrl
         };
         accepted.push(frameOut);
       } catch(err:any) {
@@ -735,7 +669,7 @@ router.get('/api/list-frames', async (req, res) => {
   }
 });
 
-// Get single frame from Redis (binary PNG)
+// Get single frame (redirect to Reddit CDN or serve from Redis legacy)
 router.get('/api/frame/:key', async (req, res) => {
   try {
     const { postId } = context;
@@ -744,25 +678,21 @@ router.get('/api/frame/:key', async (req, res) => {
     const frameDataStr = await redis.get(`frames:data:${postId}:${key}`);
     if (!frameDataStr) return res.status(404).json({ error: 'frame not found' });
     const frameData: StoredFrame = JSON.parse(frameDataStr);
-    // If stored in R2 and public base is configured, redirect to that URL (immutable caching preferred)
-    if (frameData.storage === 'r2') {
-      if (currentR2Config.publicBaseUrl) {
-        const loc = `${currentR2Config.publicBaseUrl.replace(/\/$/,'')}/${encodeURIComponent(key)}`;
-        res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
-        return res.redirect(302, loc);
-      }
-      // No public base: proxy bytes from R2
-      const obj = await r2GetObject(key);
-      if (obj?.Body) {
-        res.setHeader('Content-Type', 'image/png');
-        res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
-        // stream body to response
-        // @ts-ignore - Readable stream type differs in Node/Fetch
-        obj.Body.pipe(res);
-        return;
-      }
-      // If proxy failed, fall through to Redis dataUrl if present
+    // Reddit CDN storage: redirect to permanent i.redd.it URL
+    if (frameData.storage === 'reddit' && frameData.mediaUrl) {
+      res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+      return res.redirect(302, frameData.mediaUrl);
     }
+    // Legacy R2 storage: redirect if mediaUrl present (migrated), else 404
+    if (frameData.storage === 'r2') {
+      if (frameData.mediaUrl) {
+        res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+        return res.redirect(302, frameData.mediaUrl);
+      }
+      // R2 files without mediaUrl are no longer accessible (R2 removed)
+      // Fall through to dataUrl if somehow present
+    }
+    // Legacy Redis storage: serve from stored dataUrl
     if (frameData.dataUrl) {
       const base64 = frameData.dataUrl.split(',')[1];
       if (!base64) return res.status(400).json({ error: 'invalid data URL' });
@@ -773,12 +703,12 @@ router.get('/api/frame/:key', async (req, res) => {
     }
     return res.status(404).json({ error: 'image not available' });
   } catch(e: any) {
-    console.error('[devvit r2/frame] error', e?.message);
+    console.error('[frame] error', e?.message);
     res.status(500).json({ error: 'fail' });
   }
 });
 
-// Upload frame to Redis storage
+// Upload frame to Reddit CDN
 router.post('/api/upload-frame', async (req, res) => {
   try {
     const { postId } = context;
@@ -786,35 +716,32 @@ router.post('/api/upload-frame', async (req, res) => {
     
     if (!postId) return res.status(400).json({ error: 'post not found' });
     
-    console.log('[devvit r2/upload-frame] incoming', dataUrl ? dataUrl.length : 0, 'postId', postId);
+    console.log('[upload-frame] incoming', dataUrl ? dataUrl.length : 0, 'postId', postId);
     
     if (typeof dataUrl !== 'string' || !dataUrl.startsWith('data:image/png;base64,')) {
       return res.status(400).json({ error: 'invalid dataUrl' });
     }
     
     const base64 = dataUrl.split(',')[1] || '';
-    const buffer = Buffer.from(base64, 'base64');
+    const size = Math.ceil(base64.length * 3 / 4);
     
-    if (buffer.length > 512 * 1024) {
-      return res.status(413).json({ error: 'too large' });
+    if (size > 5 * 1024 * 1024) {
+      return res.status(413).json({ error: 'too large (max 5MB)' });
     }
     
-  const ts = await nowMs();
-  const id = ts.toString(36) + '-' + crypto.randomBytes(3).toString('hex');
+    const ts = await nowMs();
+    const id = ts.toString(36) + '-' + crypto.randomBytes(3).toString('hex');
     const week = await computeWeekForTimestamp(ts);
     const key = `frames/week-${week}/${id}.png`;
     
     const username = await reddit.getCurrentUsername();
     let stored: StoredFrame;
-  await ensureS3Client();
-  if (currentR2Config.enabled && s3Client) {
-      const ok = await r2PutPng(key, buffer);
-      if (ok) {
-        stored = { key, timestamp: ts, artist: username || 'anonymous', week, storage: 'r2', size: buffer.byteLength, contentType: 'image/png' };
-      } else {
-        stored = { key, dataUrl, timestamp: ts, artist: username || 'anonymous', week, storage: 'redis' };
-      }
+    // Upload to Reddit CDN
+    const mediaUrl = await uploadToRedditCDN(dataUrl);
+    if (mediaUrl) {
+      stored = { key, mediaUrl, timestamp: ts, artist: username || 'anonymous', week, storage: 'reddit', size, contentType: 'image/png' };
     } else {
+      // Fallback to Redis storage
       stored = { key, dataUrl, timestamp: ts, artist: username || 'anonymous', week, storage: 'redis' };
     }
     await redis.set(`frames:data:${postId}:${key}`, JSON.stringify(stored));
@@ -825,10 +752,10 @@ router.post('/api/upload-frame', async (req, res) => {
     frameKeys.push(key);
     await redis.set(`frames:list:${postId}`, JSON.stringify(frameKeys));
     
-    console.log('[devvit r2/upload-frame] stored in redis', key, 'for post', postId);
-  res.json({ ok: true, key, url: (stored.storage === 'r2' && currentR2Config.publicBaseUrl) ? `${currentR2Config.publicBaseUrl.replace(/\/$/,'')}/${encodeURIComponent(key)}` : dataUrl });
+    console.log('[upload-frame] stored', key, 'storage:', stored.storage, 'for post', postId);
+    res.json({ ok: true, key, url: mediaUrl || dataUrl });
   } catch(e: any) {
-    console.error('[devvit r2/upload-frame] error', e?.message);
+    console.error('[upload-frame] error', e?.message);
     res.status(500).json({ error: 'upload failed', message: e?.message });
   }
 });
@@ -922,54 +849,13 @@ router.delete('/api/mods/:username', async (req, res) => {
   } catch(e:any){ res.status(500).json({ error: 'mod remove failed', message: e?.message }); }
 });
 
-// R2 configuration management (mod-only)
-router.get('/api/r2-config', async (_req, res) => {
-  try {
-    const { postId } = context; if (!postId) return res.status(400).json({ error: 'post not found' });
-    const me = await reddit.getCurrentUsername(); const allowed = await isModUser(me, postId);
-    if (!allowed) return res.status(403).json({ error: 'forbidden' });
-    // Merge Redis over env/settings for visibility
-    await ensureS3Client();
-    const fromRedis = await loadR2ConfigFromRedis();
-    const merged: R2Config = { ...loadR2ConfigFromEnv(), ...fromRedis } as R2Config;
-    res.json({ ok: true, config: { enabled: !!merged.enabled, bucket: merged.bucket || null, endpoint: merged.endpoint || null, publicBaseUrl: merged.publicBaseUrl || null, hasKeys: !!(merged.accessKeyId && merged.secretAccessKey) } });
-  } catch (e:any) {
-    res.status(500).json({ ok:false, error: e?.message });
-  }
+// R2 config endpoints removed — storage now uses Reddit Media API.
+// Legacy endpoints return 410 Gone to inform any cached clients.
+router.get('/api/r2-config', (_req, res) => {
+  res.status(410).json({ error: 'R2 storage removed. Images now use Reddit Media API.' });
 });
-
-router.post('/api/r2-config', async (req, res) => {
-  try {
-    const { postId } = context; if (!postId) return res.status(400).json({ error: 'post not found' });
-    const me = await reddit.getCurrentUsername();
-    // Bootstrap: if no mods configured yet, allow first-time setup by anyone
-    let allowed = await isModUser(me, postId);
-    try {
-      const raw = await redis.get(MODS_SET_KEY(postId));
-      const list: string[] = raw ? JSON.parse(raw) : [];
-      if (!list || list.length === 0) allowed = true;
-    } catch {}
-    if (!allowed) return res.status(403).json({ error: 'forbidden' });
-    const { enabled, bucket, endpoint, accessKeyId, secretAccessKey, publicBaseUrl } = req.body || {};
-    if (typeof bucket !== 'string' || !bucket.trim()) return res.status(400).json({ error: 'bucket required' });
-    if (typeof endpoint !== 'string' || !endpoint.trim()) return res.status(400).json({ error: 'endpoint required' });
-    if (typeof accessKeyId !== 'string' || !accessKeyId.trim()) return res.status(400).json({ error: 'accessKeyId required' });
-    if (typeof secretAccessKey !== 'string' || !secretAccessKey.trim()) return res.status(400).json({ error: 'secretAccessKey required' });
-    // Persist to Redis
-    await Promise.all([
-      redis.set(R2_CFG_KEY('enabled'), (enabled === true || enabled === '1' || String(enabled).toLowerCase() === 'true') ? '1' : '0'),
-      redis.set(R2_CFG_KEY('bucket'), bucket.trim()),
-      redis.set(R2_CFG_KEY('endpoint'), endpoint.trim()),
-      redis.set(R2_CFG_KEY('accessKeyId'), accessKeyId.trim()),
-      redis.set(R2_CFG_KEY('secretAccessKey'), secretAccessKey.trim()),
-      typeof publicBaseUrl === 'string' ? redis.set(R2_CFG_KEY('publicBaseUrl'), publicBaseUrl.trim()) : Promise.resolve(),
-    ]);
-    // Reconfigure client lazily
-    await ensureS3Client();
-    res.json({ ok:true });
-  } catch (e:any) {
-    res.status(500).json({ ok:false, error: e?.message });
-  }
+router.post('/api/r2-config', (_req, res) => {
+  res.status(410).json({ error: 'R2 storage removed. Images now use Reddit Media API.' });
 });
 
 // Cast a vote on a frame (path param)
@@ -1087,10 +973,10 @@ router.get('/api/mod/frames', async (_req, res) => {
       const vraw = await redis.get(VOTES_KEY(postId, key));
       let votesUp = 0, votesDown = 0;
       if (vraw) { try { const v = JSON.parse(vraw); votesUp = v.up||0; votesDown = v.down||0; } catch{} }
-      const publicSrc = (fd.storage === 'r2' && currentR2Config.publicBaseUrl)
-        ? `${currentR2Config.publicBaseUrl.replace(/\/$/,'')}/${encodeURIComponent(key)}`
+      const publicSrc = (fd.storage === 'reddit' && fd.mediaUrl)
+        ? fd.mediaUrl
         : `/api/frame/${encodeURIComponent(key)}`;
-      out.push({ key, url: fd.storage === 'r2' ? undefined : fd.dataUrl, src: publicSrc, lastModified: fd.timestamp, artist: fd.artist, votesUp, votesDown, flaggedAt: fd.flaggedAt||null });
+      out.push({ key, url: (fd.storage === 'reddit' || fd.storage === 'r2') ? undefined : fd.dataUrl, src: publicSrc, lastModified: fd.timestamp, artist: fd.artist, votesUp, votesDown, flaggedAt: fd.flaggedAt||null });
     }
     res.json({ frames: out });
   } catch(e:any){ res.status(500).json({ error: 'mod list failed', message: e?.message }); }
@@ -1435,29 +1321,9 @@ router.get('/api/chat/health', async (_req,res)=>{
   } catch(e:any){ res.status(500).json({ ok:false, error:e?.message }); }
 });
 
-// R2/S3 health check: verifies client configuration with a tiny put/get/delete cycle
-router.get('/api/r2-health', async (req, res) => {
-  try {
-    await ensureS3Client();
-    const configured = !!(currentR2Config.enabled && s3Client && currentR2Config.bucket && currentR2Config.endpoint);
-    if (!configured) {
-      return res.json({ ok: false, configured: false, enabled: currentR2Config.enabled, bucket: currentR2Config.bucket || null, endpoint: currentR2Config.endpoint || null });
-    }
-    const key = `health/ping-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}.txt`;
-    const body = Buffer.from('ok');
-    let putOK = false, getOK = false, deleteOK = false;
-    let putErr: string | null = null, getErr: string | null = null, delErr: string | null = null;
-    try { await s3Client!.send(new PutObjectCommand({ Bucket: currentR2Config.bucket, Key: key, Body: body, CacheControl: 'no-store', ContentType: 'text/plain' })); putOK = true; } catch(e:any){ putErr = e?.message || String(e); console.error('[r2-health] put error', putErr); }
-    try { const obj = await r2GetObject(key); if (obj?.Body) { getOK = true; } } catch(e:any){ getErr = e?.message || String(e); console.error('[r2-health] get error', getErr); }
-    try { deleteOK = await r2DeleteObject(key); } catch(e:any){ delErr = e?.message || String(e); console.error('[r2-health] delete error', delErr); }
-    const ok = putOK && getOK; // deleteOK is optional
-    const debug = req.query.debug === '1';
-    const base = { ok, putOK, getOK, deleteOK, bucket: currentR2Config.bucket, endpoint: currentR2Config.endpoint, publicBase: !!currentR2Config.publicBaseUrl } as any;
-    if (debug) base.errors = { put: putErr, get: getErr, del: delErr };
-    res.json(base);
-  } catch(e:any){
-    res.status(500).json({ ok:false, error: e?.message });
-  }
+// R2/S3 health check removed — storage now uses Reddit Media API.
+router.get('/api/r2-health', (_req, res) => {
+  res.status(410).json({ ok: false, error: 'R2 storage removed. Images now use Reddit Media API.' });
 });
 // Use router middleware
 app.use(router);

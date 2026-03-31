@@ -1,6 +1,6 @@
 {
   "$schema": "https://developers.reddit.com/schema/config-file.v1.json",
-  "name": "docefps",
+  "name": "kinora-app",
   "post": {
     "dir": "dist/client",
     "entrypoints": {
@@ -13,12 +13,14 @@
     "dir": "dist/server",
     "entry": "index.cjs"
   },
-  "media": {},
+  "permissions": {
+    "media": true
+  },
   "menu": {
     "items": [
       {
         "label": "Create a new post",
-        "description": "twelve-fps",
+        "description": "Kinora - Collaborative Animation",
         "location": "subreddit",
         "forUserType": "moderator",
         "endpoint": "/internal/menu/post-create"
@@ -29,6 +31,6 @@
     "onAppInstall": "/internal/on-app-install"
   },
   "dev": {
-    "subreddit": "doce12twelve_dev"
+    "subreddit": "kinora_app_dev"
   }
 }

@@ -8,9 +8,9 @@ export const createPost = async () => {
 
   return await reddit.submitCustomPost({
     splash: {
-      appDisplayName: 'twelve-fps',
+      appDisplayName: 'Kinora',
     },
     subredditName: subredditName,
-    title: 'twelve-fps',
+    title: 'Kinora',
   });
 };

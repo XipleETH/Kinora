@@ -198,7 +198,7 @@ function App() {
   const [draftImage, setDraftImage] = useState<string | null>(null);
 
   // Draft persistence (localStorage + future server/Redis hook)
-  const DRAFT_KEY = '12fps:current-draft';
+  const DRAFT_KEY = 'kinora:current-draft';
   useEffect(() => {
     try {
       const stored = localStorage.getItem(DRAFT_KEY);
@@ -211,10 +211,10 @@ function App() {
     try {
       const params = new URLSearchParams(window.location.search);
       const qUser = params.get('user');
-      const stored = localStorage.getItem('12fps:user');
+      const stored = localStorage.getItem('kinora:user');
       const finalUser = qUser || stored || ('user'+Math.random().toString(36).slice(2,8));
       setCurrentUser(finalUser);
-      localStorage.setItem('12fps:user', finalUser);
+      localStorage.setItem('kinora:user', finalUser);
     } catch {}
   }, []);
 
@@ -229,7 +229,7 @@ function App() {
         const j = await r.json();
         if (!aborted && j && j.username) {
           setCurrentUser(j.username);
-          try { localStorage.setItem('12fps:user', j.username); } catch {}
+          try { localStorage.setItem('kinora:user', j.username); } catch {}
         }
       } catch {}
     })();

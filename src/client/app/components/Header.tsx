@@ -7,7 +7,7 @@ interface HeaderProps {
 }
 
 export const Header: React.FC<HeaderProps> = ({ currentView, setCurrentView }) => {
-  const Logo12FPS: React.FC<{ className?: string }> = ({ className }) => (
+  const LogoKinora: React.FC<{ className?: string }> = ({ className }) => (
     <svg
       viewBox="0 0 24 24"
       fill="none"
@@ -58,9 +58,9 @@ export const Header: React.FC<HeaderProps> = ({ currentView, setCurrentView }) =
     >
       <div className="flex items-center gap-2 px-3 py-4 select-none border-b border-white/10">
         <div className="w-9 h-9 bg-gradient-to-tr from-purple-500 via-fuchsia-500 to-pink-500 rounded-xl flex items-center justify-center shadow-inner flex-shrink-0">
-          <Logo12FPS className="w-5 h-5 text-white" />
+          <LogoKinora className="w-5 h-5 text-white" />
         </div>
-        <span className="text-lg font-extrabold tracking-tight bg-gradient-to-tr from-white via-fuchsia-200 to-purple-300 bg-clip-text text-transparent drop-shadow-sm opacity-0 group-hover/side:opacity-100 transition-opacity duration-200">12FPS</span>
+        <span className="text-lg font-extrabold tracking-tight bg-gradient-to-tr from-white via-fuchsia-200 to-purple-300 bg-clip-text text-transparent drop-shadow-sm opacity-0 group-hover/side:opacity-100 transition-opacity duration-200">Kinora</span>
       </div>
       <nav className="flex-1 overflow-y-auto px-2 py-4 flex flex-col gap-2">
         {navigation.map(({ key, label, icon: Icon }) => {
