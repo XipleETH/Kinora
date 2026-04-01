@@ -218,13 +218,13 @@ function App() {
     } catch {}
   }, []);
 
-  // Override with Reddit username when embedded in Reddit via Devvit endpoint
+  // Always try to resolve Reddit username via Devvit server API
+  // (works in both iframe embeds AND native mobile app WebViews)
   useEffect(() => {
-    if (!isEmbedded || embedContext !== 'reddit') return;
     let aborted = false;
     (async () => {
       try {
-  const r = await fetch('/api/whoami'); // stays relative inside reddit embed
+  const r = await fetch('/api/whoami');
         if (!r.ok) return;
         const j = await r.json();
         if (!aborted && j && j.username) {
@@ -234,7 +234,7 @@ function App() {
       } catch {}
     })();
     return () => { aborted = true; };
-  }, [isEmbedded, embedContext]);
+  }, []);
 
   // Poll turn info every 15s
   useEffect(() => {

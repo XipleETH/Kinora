@@ -3,6 +3,7 @@ import { InitResponse, IncrementResponse, DecrementResponse } from '../shared/ty
 import { redis, reddit, createServer, context, getServerPort, media } from '@devvit/web/server';
 import { createPost } from './core/post';
 import crypto from 'node:crypto';
+import { RichTextBuilder } from '@devvit/shared-types/richtext/RichTextBuilder.js';
 
 const app = express();
 
@@ -134,6 +135,160 @@ async function uploadToRedditCDN(dataUrl: string): Promise<string | null> {
 
 // Helper to store pending frame data URL separately from turn state (avoids JSON bloat)
 const PENDING_FRAME_DATA_KEY = (postId: string) => `pending:frame:data:${postId}`;
+
+// --- Daily Showcase Post System ---
+// Each day, a regular Reddit post is created showcasing all frames drawn that day.
+// Each finalized frame is auto-commented on that day's post with the image.
+const SHOWCASE_DAILY_KEY = (postId: string, dateStr: string) => `showcase:daily:${postId}:${dateStr}`;
+
+function getUTCDateString(ms: number): string {
+  const d = new Date(ms);
+  return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}`;
+}
+
+function formatDateHuman(ms: number): string {
+  const months = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+  const d = new Date(ms);
+  return `${months[d.getUTCMonth()]} ${d.getUTCDate()}, ${d.getUTCFullYear()}`;
+}
+
+async function getOrCreateDailyShowcasePost(postId: string): Promise<string | null> {
+  try {
+    const now = await nowMs();
+    const dateStr = getUTCDateString(now);
+    const redisKey = SHOWCASE_DAILY_KEY(postId, dateStr);
+    // Check if today's post already exists
+    const existing = await redis.get(redisKey);
+    if (existing && existing.startsWith('t3_')) {
+      return existing;
+    }
+    // Need to create today's post — get weekly config for title/body
+    const currentWeek = await ensureCurrentWeek();
+    const anchorStr = await redis.get(WEEK_ANCHOR_KEY);
+    const anchorMs = anchorStr ? parseInt(anchorStr, 10) : now;
+    const weekBounds = getWeekBoundariesFromAnchor(anchorMs, currentWeek);
+    const dayOfWeek = Math.min(7, Math.max(1, Math.floor((now - weekBounds.startMs) / (24 * 60 * 60 * 1000)) + 1));
+    // Get winners for theme/palette/brushes
+    let themeTitle: string | null = null;
+    let paletteName: string | null = null;
+    let paletteColors: string[] = [];
+    let brushKitName: string | null = null;
+    let brushNames: string[] = [];
+    if (currentWeek > 1) {
+      const winnersStr = await redis.get(WEEK_WINNERS_KEY(postId, currentWeek - 1));
+      if (winnersStr) {
+        try {
+          const w = JSON.parse(winnersStr);
+          if (w.theme && w.theme.title) themeTitle = w.theme.title;
+          if (w.palette) {
+            paletteName = w.palette.title || null;
+            if (w.palette.data && Array.isArray(w.palette.data.colors)) paletteColors = w.palette.data.colors;
+          }
+          if (w.brushKit) {
+            brushKitName = w.brushKit.title || null;
+            if (w.brushKit.data && Array.isArray(w.brushKit.data.brushes)) brushNames = w.brushKit.data.brushes.map((b: any) => typeof b === 'string' ? b : b.name || '');
+          }
+        } catch {}
+      }
+    }
+    // Build post title
+    const title = themeTitle
+      ? `🎬 ${themeTitle} — Day ${dayOfWeek} | Kinora Week ${currentWeek}`
+      : `🎬 Kinora Animations — Day ${dayOfWeek}, Week ${currentWeek}`;
+    // Build post body
+    const dateHuman = formatDateHuman(now);
+    let body = `# Kinora Daily Showcase
+
+📅 **${dateHuman}** • Week ${currentWeek}, Day ${dayOfWeek}
+
+`;
+    if (themeTitle) body += `🎨 **Theme:** ${themeTitle}
+
+`;
+    if (paletteName || paletteColors.length > 0) {
+      body += `🎨 **Palette${paletteName ? ': ' + paletteName : ''}**
+`;
+      if (paletteColors.length > 0) body += `Colors: ${paletteColors.join(' • ')}
+
+`;
+      else body += `
+`;
+    }
+    if (brushKitName || brushNames.length > 0) {
+      body += `🖌️ **Brushes${brushKitName ? ': ' + brushKitName : ''}**
+`;
+      if (brushNames.length > 0) body += `${brushNames.join(' • ')}
+
+`;
+      else body += `
+`;
+    }
+    body += `---
+
+*Each comment below is a frame drawn by a community artist. Together they create a collaborative animation!*`;
+    // Create the post
+    const { subredditName } = context;
+    if (!subredditName) {
+      console.warn('[showcase] no subredditName in context, cannot create post');
+      return null;
+    }
+    console.log('[showcase] creating daily post:', title);
+    const post = await reddit.submitPost({
+      subredditName,
+      title,
+      text: body,
+    });
+    const showcasePostId = post.id;
+    // Store in Redis for today
+    await redis.set(redisKey, showcasePostId);
+    console.log('[showcase] daily post created:', showcasePostId, 'for date', dateStr);
+    return showcasePostId;
+  } catch (e: any) {
+    console.error('[showcase] failed to create daily post:', e?.message);
+    return null;
+  }
+}
+
+async function postFrameAsComment(
+  showcasePostId: string,
+  imageUrl: string,
+  artist: string,
+  week: number,
+  frameNumber: number
+): Promise<void> {
+  const now = await nowMs();
+  const dateHuman = formatDateHuman(now);
+  // Build richtext comment with embedded image (markdown ![](url) doesn't work via API)
+  const richtext = new RichTextBuilder()
+    .paragraph((p) => {
+      p.text({ text: `🖼️ Frame #${frameNumber} by u/${artist}` });
+    })
+    .image({ mediaUrl: imageUrl, caption: `Frame #${frameNumber} by u/${artist}` })
+    .paragraph((p) => {
+      p.text({ text: `Week ${week} • ${dateHuman}` });
+    });
+  // Retry up to 3 times
+  let lastError: any = null;
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      console.log('[showcase] submitting comment on', showcasePostId, 'attempt', attempt, 'imageUrl:', imageUrl);
+      await reddit.submitComment({
+        id: showcasePostId as `t3_${string}`,
+        richtext,
+      });
+      console.log('[showcase] comment posted on', showcasePostId, 'frame #' + frameNumber, 'attempt', attempt);
+      return;
+    } catch (e: any) {
+      lastError = e;
+      console.warn('[showcase] comment attempt', attempt, 'failed:', e?.message);
+      if (attempt < 3) {
+        await new Promise(resolve => setTimeout(resolve, 1000 * attempt));
+      }
+    }
+  }
+  console.error('[showcase] all 3 comment attempts failed:', lastError?.message);
+}
+
 
 router.get<{ postId: string }, InitResponse | { status: string; message: string }>(
   '/api/init',
@@ -476,6 +631,17 @@ router.post('/api/finalize-turn', async (_req, res) => {
         frameKeys.push(key);
         await redis.set(`frames:list:${postId}`, JSON.stringify(frameKeys));
         console.log('[finalize-turn] frame stored:', key, 'storage:', stored.storage);
+        // --- Auto-post to daily showcase ---
+        if (stored.mediaUrl) {
+          try {
+            const showcaseId = await getOrCreateDailyShowcasePost(postId);
+            if (showcaseId) {
+              await postFrameAsComment(showcaseId, stored.mediaUrl, state.currentArtist!, week, frameKeys.length);
+            }
+          } catch (showcaseErr: any) {
+            console.warn('[finalize-turn] showcase auto-comment failed (non-fatal):', showcaseErr?.message);
+          }
+        }
       }
       // Clean up pending data key
       try { await redis.set(PENDING_FRAME_DATA_KEY(postId), ''); } catch {}
