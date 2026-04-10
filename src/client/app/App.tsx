@@ -83,6 +83,7 @@ function App() {
   // Dynamic weekly tools from backend
   const [allowedBrushIds, setAllowedBrushIds] = useState<string[] | undefined>(undefined);
   const [paletteColors, setPaletteColors] = useState<string[] | undefined>(undefined);
+  const [serverTheme, setServerTheme] = useState<string | null>(null);
   // Helper: map server list item to Frame (meta-first). Image data may be omitted; hydration will fill as needed.
   const mapServerItemToFrame = useCallback((o:any): Frame => {
     const wk = typeof o.week === 'number' ? o.week : (typeof o.key === 'string' && /week-(\d+)\//.test(o.key) ? parseInt(o.key.match(/week-(\d+)\//)![1],10) : currentWeek);
@@ -365,6 +366,8 @@ function App() {
       // Guard: ensure object
       if (!cfg || typeof cfg !== 'object') return;
       if (typeof cfg.currentWeek === 'number') setCurrentWeek(cfg.currentWeek);
+      // Set server-authoritative theme
+      if (cfg.theme && typeof cfg.theme === 'string') setServerTheme(cfg.theme);
   // toolsVersion display removed from debug bar; ignore cfg.toolsVersion
       // Prefer canonical tools object if present
       const colors: string[] | undefined = cfg?.tools?.palette?.colors || cfg.paletteColors;
@@ -603,13 +606,13 @@ function App() {
     ctx.putImageData(prev, 0, 0);
   };
 
+  // Frames from the current week only — used for onion skin and spectator view
+  // so that new weeks start with a blank canvas
+  const currentWeekFrames = useMemo(() => frames.filter(f => f.paletteWeek === currentWeek), [frames, currentWeek]);
+
   const themes = ['Anime Inking', 'Retro Comic', 'Soft Watercolor'];
-  let storedBundleTheme: string | null = null;
-  try {
-    const wbRaw = localStorage.getItem('weekBundle_'+currentWeek);
-    if (wbRaw) { const wb = JSON.parse(wbRaw); if (wb && typeof wb.theme === 'string') storedBundleTheme = wb.theme; }
-  } catch {}
-  const currentTheme = storedBundleTheme || themes[currentWeek % themes.length];
+  // Server theme takes priority; localStorage bundle is only for next-week preview
+  const currentTheme = serverTheme || (currentWeek === 1 ? 'Holy Week' : themes[currentWeek % themes.length]);
   const formatCountdown = (sec:number)=>{
     const h = Math.floor(sec/3600).toString().padStart(2,'0');
     const m = Math.floor((sec%3600)/60).toString().padStart(2,'0');
@@ -726,11 +729,12 @@ function App() {
                       onBeforeMutate={snapshotCanvas}
                       zoom={zoom}
                       // Only show onion (previous frame) to the active artist as a faint guide
-                      onionImage={(turnInfo && turnInfo.currentArtist === currentUser && frames.length) ? frames[frames.length-1].imageData : undefined}
+                      // Filter to current week so new weeks start with a blank canvas
+                      onionImage={(turnInfo && turnInfo.currentArtist === currentUser && currentWeekFrames.length) ? currentWeekFrames[currentWeekFrames.length-1]?.imageData : undefined}
                       onionOpacity={onionOpacity}
                       onDirty={persistDraft}
                       // Spectators see the last finalized frame fully; artist sees their draft (if any)
-                      restoreImage={(turnInfo && turnInfo.currentArtist === currentUser) ? draftImage : (frames.length ? frames[frames.length-1].imageData : null)}
+                      restoreImage={(turnInfo && turnInfo.currentArtist === currentUser) ? draftImage : (currentWeekFrames.length ? currentWeekFrames[currentWeekFrames.length-1]?.imageData : null)}
                     />
                 </div>
                 {paletteSide === 'left' && (

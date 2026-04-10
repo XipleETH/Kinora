@@ -212,20 +212,24 @@ export const SidePanels: React.FC<SidePanelsProps> = ({
       return (
         <PanelWrapper key={key} title="Tools" {...common}>
           <div className="flex flex-wrap gap-2 justify-center">
-            {['draw', 'erase', 'fill'].map((t) => (
-              <button
-                key={t}
-                onClick={() => setTool(t as any)}
-                disabled={disabled}
-                aria-label={t}
-                title={t}
-                className={`p-1.5 rounded-full pencil-btn transition flex items-center justify-center ${tool === t ? 'ring-2 ring-black' : ''} disabled:opacity-40`}
-              >
-                {t === 'draw' && <Pencil className="w-4 h-4" />}
-                {t === 'erase' && <Eraser className="w-4 h-4" />}
-                {t === 'fill' && <PaintBucket className="w-4 h-4" />}
-              </button>
-            ))}
+            {['draw', 'erase', 'fill'].map((t) => {
+              const isActive = tool === t;
+              return (
+                <button
+                  key={t}
+                  onClick={() => setTool(t as any)}
+                  disabled={disabled}
+                  aria-label={t}
+                  title={t}
+                  className={`p-1.5 rounded-full pencil-btn transition flex items-center justify-center disabled:opacity-40`}
+                  style={isActive ? { backgroundColor: 'var(--ink)', borderColor: 'var(--paper-bg)', boxShadow: '1px 1px 0 var(--paper-bg)' } : {}}
+                >
+                  {t === 'draw' && <Pencil className="w-4 h-4" style={isActive ? { color: 'var(--paper-bg)' } : {}} />}
+                  {t === 'erase' && <Eraser className="w-4 h-4" style={isActive ? { color: 'var(--paper-bg)' } : {}} />}
+                  {t === 'fill' && <PaintBucket className="w-4 h-4" style={isActive ? { color: 'var(--paper-bg)' } : {}} />}
+                </button>
+              );
+            })}
           </div>
         </PanelWrapper>
       );
@@ -374,15 +378,16 @@ export const SidePanels: React.FC<SidePanelsProps> = ({
       const defaultIds = ['ink','acrylic-paint','watercolor-wash','airbrush'];
       const ids = (allowedBrushIds && allowedBrushIds.length > 0 ? allowedBrushIds : defaultIds).slice(0,4);
       const presets: BrushPreset[] = allBrushPresets.filter(p => ids.includes(p.id));
+      const iconStroke = (active: boolean) => active ? '#FAF3E0' : 'black';
       const InkIcon = ({ active }: { active: boolean }) => (
-        <svg viewBox="0 0 24 24" className="w-5 h-5" stroke="black" fill="none" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" style={{ opacity: active ? 1 : 0.85 }}>
+        <svg viewBox="0 0 24 24" className="w-5 h-5" stroke={iconStroke(active)} fill="none" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" style={{ opacity: active ? 1 : 0.85 }}>
           <path d="M5 19c4-1 7-4 9-8 1-2 2-4 2-6" />
           <path d="M15 5c0 2-1.2 3.2-2.4 4.4C10.8 11.2 9 13 8 16l-.7 2.1" />
           <path d="M4 21h16" />
         </svg>
       );
       const AcrilicoIcon = ({ active }: { active: boolean }) => (
-        <svg viewBox="0 0 24 24" className="w-5 h-5" stroke="black" fill="none" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" style={{ opacity: active ? 1 : 0.8 }}>
+        <svg viewBox="0 0 24 24" className="w-5 h-5" stroke={iconStroke(active)} fill="none" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" style={{ opacity: active ? 1 : 0.8 }}>
           {/* Stylized flat brush with bristles */}
           <path d="M4 20h16" />
           <path d="M6 14h12l-1.5 4h-9z" />
@@ -390,7 +395,7 @@ export const SidePanels: React.FC<SidePanelsProps> = ({
         </svg>
       );
       const AirbrushIcon = ({ active }: { active: boolean }) => (
-        <svg viewBox="0 0 24 24" className="w-5 h-5" stroke="black" fill="none" strokeWidth={1.6} strokeLinecap="round" strokeLinejoin="round" style={{ opacity: active ? 1 : 0.85 }}>
+        <svg viewBox="0 0 24 24" className="w-5 h-5" stroke={iconStroke(active)} fill="none" strokeWidth={1.6} strokeLinecap="round" strokeLinejoin="round" style={{ opacity: active ? 1 : 0.85 }}>
           {/* Airbrush nozzle with diffuse spray dots */}
           <path d="M5 18h4l2-4" />
           <path d="M9 10h6l2 4H11z" />
@@ -404,14 +409,14 @@ export const SidePanels: React.FC<SidePanelsProps> = ({
         </svg>
       );
       const AcuarelaIcon = ({ active }: { active: boolean }) => (
-        <svg viewBox="0 0 24 24" className="w-5 h-5" stroke="black" fill="none" strokeWidth={1.6} strokeLinecap="round" strokeLinejoin="round" style={{ opacity: active ? 1 : 0.8 }}>
+        <svg viewBox="0 0 24 24" className="w-5 h-5" stroke={iconStroke(active)} fill="none" strokeWidth={1.6} strokeLinecap="round" strokeLinejoin="round" style={{ opacity: active ? 1 : 0.8 }}>
           {/* Droplet + soft stroke */}
           <path d="M12 3c-2.5 3-4 5.5-4 7.5A4 4 0 0 0 12 15a4 4 0 0 0 4-4.5C16 8.5 14.5 6 12 3Z" />
           <path d="M5 19c4-1.2 10-.8 14 0" />
         </svg>
       );
       const LapiceroIcon = ({ active }: { active: boolean }) => (
-        <svg viewBox="0 0 24 24" className="w-5 h-5" stroke="black" fill="none" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" style={{ opacity: active ? 1 : 0.8 }}>
+        <svg viewBox="0 0 24 24" className="w-5 h-5" stroke={iconStroke(active)} fill="none" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" style={{ opacity: active ? 1 : 0.8 }}>
           {/* Ballpoint pen silhouette */}
           <path d="M5 16 14.5 6.5a2.2 2.2 0 0 1 3 3L8 19l-4 1 1-4Z" />
           <path d="m14.5 6.5 3 3" />
@@ -419,13 +424,13 @@ export const SidePanels: React.FC<SidePanelsProps> = ({
         </svg>
       );
       const MarkerIcon = ({ active }: { active: boolean }) => (
-        <svg viewBox="0 0 24 24" className="w-5 h-5" stroke="black" fill="none" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" style={{ opacity: active ? 1 : 0.8 }}>
+        <svg viewBox="0 0 24 24" className="w-5 h-5" stroke={iconStroke(active)} fill="none" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" style={{ opacity: active ? 1 : 0.8 }}>
           <path d="M4 20h16" />
           <path d="M7 16 15.5 4.5a2.1 2.1 0 0 1 3 2.9L11 19l-4 1 1-4Z" />
         </svg>
       );
       const CharcoalIcon = ({ active }: { active: boolean }) => (
-        <svg viewBox="0 0 24 24" className="w-5 h-5" stroke="black" fill="none" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" style={{ opacity: active ? 1 : 0.8 }}>
+        <svg viewBox="0 0 24 24" className="w-5 h-5" stroke={iconStroke(active)} fill="none" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" style={{ opacity: active ? 1 : 0.8 }}>
           <path d="M5 19c2.5-1.2 5-2.4 7.2-5.2 1.8-2.2 2.8-4.4 3.3-6.5" />
           <path d="M9 18c1.2-.6 2.4-1.3 3.5-2.4 2.4-2.3 3.8-5.3 4.3-8.1" />
           <path d="M4 21h16" />
@@ -459,7 +464,8 @@ export const SidePanels: React.FC<SidePanelsProps> = ({
                     if (setBrushSpacing) setBrushSpacing(p.spacing ?? 4);
                     if (setBrushOpacity) setBrushOpacity(p.opacity ?? 1);
                   }}
-                  className={`p-1 rounded-full pencil-btn flex items-center justify-center transition ${active ? 'ring-2 ring-black' : ''} disabled:opacity-40`}
+                  className={`p-1 rounded-full pencil-btn flex items-center justify-center transition disabled:opacity-40`}
+                  style={active ? { backgroundColor: 'var(--ink)', borderColor: 'var(--paper-bg)', boxShadow: '1px 1px 0 var(--paper-bg)' } : {}}
                   aria-label={p.name}
                   title={p.name}
                 >

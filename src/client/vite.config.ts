@@ -10,6 +10,11 @@ export default defineConfig({
   emptyOutDir: true,
     sourcemap: true,
     rollupOptions: {
+      input: {
+        main: 'index.html',
+        showcase: 'showcase.html',
+        splash: 'splash.html',
+      },
       output: {
         entryFileNames: '[name].js',
         chunkFileNames: '[name].js',

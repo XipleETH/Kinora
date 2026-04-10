@@ -71,7 +71,7 @@ export const PaletteVoting: React.FC<PaletteVotingProps> = () => {
           brushes: brushNames.slice(0,4),
           updatedAt: Date.now()
         };
-        localStorage.setItem('weekBundle_'+currentWeek, JSON.stringify(payload));
+        localStorage.setItem('weekBundle_'+(currentWeek+1), JSON.stringify(payload));
       } catch {/* ignore */}
     }
     return sets;
@@ -106,16 +106,15 @@ export const PaletteVoting: React.FC<PaletteVotingProps> = () => {
 
   // Wizard state
   const [wizTheme, setWizTheme] = useState('');
-  const [wizPaletteName, setWizPaletteName] = useState('');
   const [wizPaletteColors, setWizPaletteColors] = useState<string[]>(['#FF6B6B','#4ECDC4','#45B7D1','#96CEB4','#FFEAA7','#DDA0DD']);
   const [wizBrushIds, setWizBrushIds] = useState<string[]>([]);
   const [wizardStep, setWizardStep] = useState<1|2|3>(1);
   const wizValidTheme = wizTheme.trim().length >= 3;
-  const wizValidPalette = wizPaletteName.trim().length>0 && wizPaletteColors.length===6 && wizPaletteColors.every(c=>/^#[0-9A-Fa-f]{6}$/.test(c));
+  const wizValidPalette = wizPaletteColors.length===6 && wizPaletteColors.every(c=>/^#[0-9A-Fa-f]{6}$/.test(c));
   const wizValidBrushes = wizBrushIds.length>0 && wizBrushIds.length<=4;
   const wizardComplete = wizValidTheme && wizValidPalette && wizValidBrushes;
   const toggleWizBrush = (id:string)=> setWizBrushIds(prev => prev.includes(id) ? prev.filter(x=>x!==id) : (prev.length<4 ? [...prev,id] : prev));
-  const resetWizard = ()=>{ setWizTheme(''); setWizPaletteName(''); setWizPaletteColors(['#FF6B6B','#4ECDC4','#45B7D1','#96CEB4','#FFEAA7','#DDA0DD']); setWizBrushIds([]); setWizardStep(1); };
+  const resetWizard = ()=>{ setWizTheme(''); setWizPaletteColors(['#FF6B6B','#4ECDC4','#45B7D1','#96CEB4','#FFEAA7','#DDA0DD']); setWizBrushIds([]); setWizardStep(1); };
 
   const submitCombined = useCallback(async ()=>{
     if (!currentUser || submitting || !wizardComplete) return;
@@ -123,12 +122,12 @@ export const PaletteVoting: React.FC<PaletteVotingProps> = () => {
     const groupId = 'grp_'+Date.now().toString(36)+'_'+Math.random().toString(36).slice(2,8);
     try {
       const themeOk = await submitProposal('theme', wizTheme.trim(), { description: wizTheme.trim(), groupId });
-      const paletteOk = await submitProposal('palette', wizPaletteName.trim(), { colors: wizPaletteColors, groupId });
+      const paletteOk = await submitProposal('palette', 'Custom Palette', { colors: wizPaletteColors, groupId });
       const brushNames = allBrushPresets.filter(b=>wizBrushIds.includes(b.id)).map(b=>b.name);
       const brushOk = await submitProposal('brushKit', brushNames.join(' + '), { ids:wizBrushIds, names:brushNames, groupId });
       if (themeOk && paletteOk && brushOk) { resetWizard(); }
     } finally { setSubmitting(false); }
-  }, [currentUser, submitting, wizardComplete, wizTheme, wizPaletteName, wizPaletteColors, wizBrushIds, submitProposal]);
+  }, [currentUser, submitting, wizardComplete, wizTheme, wizPaletteColors, wizBrushIds, submitProposal]);
 
   const voteCombined = useCallback(async (setObj: CombinedSet)=>{
     if (!currentUser) return;
@@ -172,7 +171,6 @@ export const PaletteVoting: React.FC<PaletteVotingProps> = () => {
               <div className="space-y-4">
                 <div className="flex flex-col md:flex-row md:items-center justify-between gap-3">
                   <h4 className="text-black font-semibold">Palette (6 colors)</h4>
-                  <input value={wizPaletteName} onChange={e=>setWizPaletteName(e.target.value)} placeholder="Palette name" className="px-3 py-2 rounded sketch-border bg-white text-black placeholder-black/40 text-sm" />
                 </div>
                 <div className="flex flex-wrap gap-4">
                   {wizPaletteColors.map((c,i)=>(

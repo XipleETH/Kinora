@@ -136,7 +136,31 @@ export const FrameGallery: React.FC<FrameGalleryProps> = ({ frames, pendingFrame
     (async ()=>{
       if (!weekNumbers.length) return;
       setFetchingDirectors(true);
-      // Seed from localStorage for instant paint
+
+      // Fetch the server-authoritative config for the current week
+      try {
+        const cfgRes = await fetch('/api/draw-config');
+        if (cfgRes.ok) {
+          const cfg = await cfgRes.json();
+          if (cfg.ok && typeof cfg.currentWeek === 'number') {
+            const cw = cfg.currentWeek;
+            const serverBundle: { theme: string; palette: string[]; brushes: string[]; director?: string } = {
+              theme: cfg.theme || (cw === 1 ? 'Holy Week' : ''),
+              palette: Array.isArray(cfg.paletteColors) ? cfg.paletteColors.slice(0, 6) : [],
+              brushes: Array.isArray(cfg.brushes) ? cfg.brushes.map((b: any) => typeof b === 'object' ? (b.name || b.id) : String(b)).slice(0, 4) : [],
+              director: cfg.director || undefined,
+            };
+            if (!cancel) {
+              setWeekBundles(prev => ({ ...prev, [cw]: serverBundle }));
+              if (serverBundle.director) {
+                setWeekDirectors(prev => ({ ...prev, [cw]: serverBundle.director! }));
+              }
+            }
+          }
+        }
+      } catch {/* ignore */}
+
+      // Seed from localStorage only for NON-current weeks (historical)
       const seededDirectors: Record<number,string> = {};
       const seededBundles: Record<number,{ theme:string; palette:string[]; brushes:string[]; director?:string }> = {};
       for (const w of weekNumbers) {
@@ -199,9 +223,11 @@ export const FrameGallery: React.FC<FrameGalleryProps> = ({ frames, pendingFrame
             themes.sort((a,b)=> (b.votes||0) - (a.votes||0));
             winner = themes[0].proposedBy;
           }
+          // Proposals from week N determine week N+1's tools
+          const targetWeek = week + 1;
           if (winner) {
-            directorUpdates[week] = winner;
-            try { localStorage.setItem('weekWinner_'+week, winner); } catch {}
+            directorUpdates[targetWeek] = winner;
+            try { localStorage.setItem('weekWinner_'+targetWeek, winner); } catch {}
           }
           if (bestGroup && bestGroup.theme && bestGroup.palette && bestGroup.brushes) {
             const paletteColors: string[] = (Array.isArray(bestGroup.palette.data)? bestGroup.palette.data : bestGroup.palette.data?.colors) || [];
@@ -213,13 +239,13 @@ export const FrameGallery: React.FC<FrameGalleryProps> = ({ frames, pendingFrame
               brushes: brushNames.slice(0,4),
               updatedAt: Date.now()
             };
-            bundleUpdates[week] = {
+            bundleUpdates[targetWeek] = {
               theme: bundlePayload.theme,
               palette: bundlePayload.palette,
               brushes: bundlePayload.brushes,
               director: winner
             };
-            try { localStorage.setItem('weekBundle_'+week, JSON.stringify(bundlePayload)); } catch {}
+            try { localStorage.setItem('weekBundle_'+targetWeek, JSON.stringify(bundlePayload)); } catch {}
           }
         }
         if (!cancel) {
@@ -316,13 +342,13 @@ export const FrameGallery: React.FC<FrameGalleryProps> = ({ frames, pendingFrame
           const fallbackThemes = ['Anime Inking', 'Retro Comic', 'Soft Watercolor'];
           const bundle = weekBundles[week];
           const palette = bundle?.palette && bundle.palette.length>=3 ? bundle.palette : (fallbackPalettes[week % fallbackPalettes.length] || fallbackPalettes[0]);
-          const theme = bundle?.theme || (fallbackThemes[week % fallbackThemes.length] || fallbackThemes[0]);
+          const theme = bundle?.theme || (week === 1 ? 'Holy Week' : (fallbackThemes[week % fallbackThemes.length] || fallbackThemes[0]));
           // Map active brush ids to display names (for fallback). When bundle has brush names, prefer them.
-          const activeIds = (activeBrushIds && activeBrushIds.length ? activeBrushIds : ['ink','acrilico','marker','charcoal']).slice(0,4);
+          const activeIds = (activeBrushIds && activeBrushIds.length ? activeBrushIds : ['ink','acrylic-paint','watercolor-wash','airbrush']).slice(0,4);
           const activeBrushNames = activeIds
             .map(id => allBrushPresets.find(p => p.id === id)?.name || id)
             .join(', ');
-          const director = weekDirectors[week];
+          const director = weekDirectors[week] || (week === 1 ? 'kinora-app' : undefined);
           const brushLine = bundle?.brushes && bundle.brushes.length ? bundle.brushes.join(', ') : activeBrushNames;
           return (
             <div key={week} className="max-w-[1580px] mx-auto px-2">

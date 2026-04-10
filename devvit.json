@@ -5,8 +5,23 @@
     "dir": "dist/client",
     "entrypoints": {
       "default": {
+        "entry": "splash.html",
+        "height": "regular",
+        "inline": true
+      },
+      "app": {
         "entry": "index.html",
         "height": "tall"
+      },
+      "showcase": {
+        "entry": "showcase.html",
+        "height": "regular",
+        "inline": true
+      },
+      "splash": {
+        "entry": "splash.html",
+        "height": "regular",
+        "inline": true
       }
     }
   },
@@ -25,11 +40,25 @@
         "location": "subreddit",
         "forUserType": "moderator",
         "endpoint": "/internal/menu/post-create"
+      },
+      {
+        "label": "Create splash post",
+        "description": "Kinora - Join invitation clapperboard",
+        "location": "subreddit",
+        "forUserType": "moderator",
+        "endpoint": "/internal/menu/splash-create"
       }
     ]
   },
   "triggers": {
     "onAppInstall": "/internal/on-app-install"
+  },
+  "scheduler": {
+    "tasks": {
+      "weekly-animation": {
+        "endpoint": "/internal/scheduler/weekly-animation"
+      }
+    }
   },
   "dev": {
     "subreddit": "kinora_app_dev"
