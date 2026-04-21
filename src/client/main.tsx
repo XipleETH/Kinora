@@ -2,9 +2,9 @@ import './index.css';
 
 import { StrictMode, useState, useEffect } from 'react';
 import { createRoot } from 'react-dom/client';
-import { App } from './App';
-import { ShowcaseApp } from './ShowcaseApp';
-import { SplashApp } from './SplashApp';
+import App from './app/App';
+import { ShowcaseApp } from './app/ShowcaseApp';
+import { SplashApp } from './app/SplashApp';
 
 function Router() {
   const [type, setType] = useState<string | null>(null);
