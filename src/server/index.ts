@@ -1672,6 +1672,34 @@ router.get('/api/voting-stats', async (req,res)=>{
   }
 });
 
+// Get the post type context for client routing
+router.get('/api/post-type', async (_req, res) => {
+  try {
+    const { postId } = context;
+    if (!postId) return res.json({ type: 'canvas' });
+    
+    // Check explicit cache if we set it upon creation
+    const cachedType = await redis.get(`postType:${postId}`);
+    if (cachedType) return res.json({ type: cachedType });
+
+    // Fallback: infer from the post title
+    const post = await reddit.getPostById(postId);
+    const tit = post.title || '';
+    if (tit.includes('🎬') || tit.includes('Week ')) {
+      await redis.set(`postType:${postId}`, 'showcase');
+      return res.json({ type: 'showcase' });
+    }
+    if (tit.includes('Join the Animation') || tit.includes('splash') || tit.includes('??')) {
+      await redis.set(`postType:${postId}`, 'splash');
+      return res.json({ type: 'splash' });
+    }
+    await redis.set(`postType:${postId}`, 'canvas');
+    return res.json({ type: 'canvas' });
+  } catch (e) {
+    return res.json({ type: 'canvas' });
+  }
+});
+
 // Minimal alias for quick user resolution (must be outside other handler)
 router.get('/api/whoami', async (_req, res) => {
   try {
