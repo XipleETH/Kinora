@@ -398,10 +398,25 @@ async function addFrameToDailyComment(
 router.get('/api/showcase-data', async (_req: any, res: any) => {
   try {
     const week = await ensureCurrentWeek();
-    const metaRaw = await redis.get(SHOWCASE_WEEK_META_KEY(week));
+    let metaRaw = await redis.get(SHOWCASE_WEEK_META_KEY(week));
     if (metaRaw) {
-      res.json(JSON.parse(metaRaw));
-    } else {
+      try {
+        const parsed = JSON.parse(metaRaw);
+        // Self-heal corrupted Week 1 data
+        if (week === 1 && parsed.theme !== 'Holy Week') {
+          const anyRedis: any = redis as any;
+          if (typeof anyRedis.del === 'function') { await anyRedis.del(SHOWCASE_WEEK_META_KEY(1)); }
+          else { await redis.set(SHOWCASE_WEEK_META_KEY(1), ''); }
+          metaRaw = null;
+        } else {
+          return res.json(parsed);
+        }
+      } catch (e) {
+        metaRaw = null;
+      }
+    }
+    
+    if (!metaRaw) {
       // Return defaults for Week 1 if metadata hasn't been stored yet
       const now = await nowMs();
       const anchorStr = await redis.get(WEEK_ANCHOR_KEY);
