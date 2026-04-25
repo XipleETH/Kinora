@@ -5,8 +5,9 @@
     "dir": "dist/client",
     "entrypoints": {
       "default": {
-        "entry": "index.html",
-        "height": "tall"
+        "entry": "splash.html",
+        "height": "regular",
+        "inline": true
       },
       "app": {
         "entry": "index.html",
@@ -14,11 +15,6 @@
       },
       "showcase": {
         "entry": "showcase.html",
-        "height": "regular",
-        "inline": true
-      },
-      "splash": {
-        "entry": "splash.html",
         "height": "regular",
         "inline": true
       }

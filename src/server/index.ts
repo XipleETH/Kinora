@@ -770,7 +770,7 @@ router.post('/internal/menu/splash-create', async (_req, res): Promise<void> => 
       return;
     }
     const post = await reddit.submitCustomPost({
-      entry: 'splash',
+      entry: 'default',
       subredditName,
       title: '🎬 Kinora — Join the Animation',
     });

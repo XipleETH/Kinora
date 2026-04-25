@@ -1,7 +1,7 @@
 {
   "private": true,
   "name": "kinora-app",
-  "version": "0.0.0",
+  "version": "0.0.69",
   "license": "BSD-3-Clause",
   "type": "module",
   "scripts": {
