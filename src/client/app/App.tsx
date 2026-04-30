@@ -612,7 +612,7 @@ function App() {
 
   const themes = ['Anime Inking', 'Retro Comic', 'Soft Watercolor'];
   // Server theme takes priority; localStorage bundle is only for next-week preview
-  const currentTheme = serverTheme || (currentWeek === 1 ? 'Holy Week' : themes[currentWeek % themes.length]);
+  const currentTheme = serverTheme || (currentWeek === 1 ? 'Moving Lines' : themes[currentWeek % themes.length]);
   const formatCountdown = (sec:number)=>{
     const h = Math.floor(sec/3600).toString().padStart(2,'0');
     const m = Math.floor((sec%3600)/60).toString().padStart(2,'0');

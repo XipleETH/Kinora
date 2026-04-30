@@ -145,7 +145,7 @@ export const FrameGallery: React.FC<FrameGalleryProps> = ({ frames, pendingFrame
           if (cfg.ok && typeof cfg.currentWeek === 'number') {
             const cw = cfg.currentWeek;
             const serverBundle: { theme: string; palette: string[]; brushes: string[]; director?: string } = {
-              theme: cfg.theme || (cw === 1 ? 'Holy Week' : ''),
+              theme: cfg.theme || (cw === 1 ? 'Moving Lines' : ''),
               palette: Array.isArray(cfg.paletteColors) ? cfg.paletteColors.slice(0, 6) : [],
               brushes: Array.isArray(cfg.brushes) ? cfg.brushes.map((b: any) => typeof b === 'object' ? (b.name || b.id) : String(b)).slice(0, 4) : [],
               director: cfg.director || undefined,
@@ -342,7 +342,7 @@ export const FrameGallery: React.FC<FrameGalleryProps> = ({ frames, pendingFrame
           const fallbackThemes = ['Anime Inking', 'Retro Comic', 'Soft Watercolor'];
           const bundle = weekBundles[week];
           const palette = bundle?.palette && bundle.palette.length>=3 ? bundle.palette : (fallbackPalettes[week % fallbackPalettes.length] || fallbackPalettes[0]);
-          const theme = bundle?.theme || (week === 1 ? 'Holy Week' : (fallbackThemes[week % fallbackThemes.length] || fallbackThemes[0]));
+          const theme = bundle?.theme || (week === 1 ? 'Moving Lines' : (fallbackThemes[week % fallbackThemes.length] || fallbackThemes[0]));
           // Map active brush ids to display names (for fallback). When bundle has brush names, prefer them.
           const activeIds = (activeBrushIds && activeBrushIds.length ? activeBrushIds : ['ink','acrylic-paint','watercolor-wash','airbrush']).slice(0,4);
           const activeBrushNames = activeIds

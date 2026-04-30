@@ -242,7 +242,7 @@ async function ensureWeeklyShowcasePost(callerPostId?: string): Promise<string |
     let directorName: string | null = null;
 
     if (currentWeek === 1) {
-      themeTitle = 'Holy Week';
+      themeTitle = 'Moving Lines';
       paletteName = 'Sunrise';
       paletteColors = ['#FF6B6B', '#4ECDC4', '#45B7D1', '#96CEB4', '#FFEAA7', '#DDA0DD'];
       brushKitName = 'Classic';
@@ -438,7 +438,7 @@ router.get('/api/showcase-data', async (_req: any, res: any) => {
       try {
         const parsed = JSON.parse(metaRaw);
         // Self-heal corrupted Week 1 data
-        if (week === 1 && parsed.theme !== 'Holy Week') {
+        if (week === 1 && parsed.theme !== 'Moving Lines') {
           const anyRedis: any = redis as any;
           if (typeof anyRedis.del === 'function') { await anyRedis.del(SHOWCASE_WEEK_META_KEY(1)); }
           else { await redis.set(SHOWCASE_WEEK_META_KEY(1), ''); }
@@ -459,7 +459,7 @@ router.get('/api/showcase-data', async (_req: any, res: any) => {
       const weekBounds = getWeekBoundariesFromAnchor(anchorMs, week);
       res.json({
         week,
-        theme: week === 1 ? 'Holy Week' : '',
+        theme: week === 1 ? 'Moving Lines' : '',
         paletteName: week === 1 ? 'Sunrise' : '',
         paletteColors: week === 1 ? ['#FF6B6B', '#4ECDC4', '#45B7D1', '#96CEB4', '#FFEAA7', '#DDA0DD'] : [],
         brushKitName: week === 1 ? 'Classic' : '',
@@ -580,7 +580,7 @@ router.get('/api/reset-showcase', async (_req: any, res: any) => {
               p.title?.includes('Kinora Animations') ||
               p.title?.includes('Kinora Week') ||
               p.title?.includes('Kinora Day') ||
-              p.title?.includes('Holy Week') ||
+              p.title?.includes('Moving Lines') ||
               p.title?.includes('Day ') ||
               p.title?.includes('Week ')
             );
@@ -1756,6 +1756,82 @@ router.get('/api/user', async (_req, res) => {
     res.json({ username: null, error: e?.message });
   }
 });
+// --- Admin: hard reset to week 1 ---
+router.post('/api/admin/reset-week', async (_req, res) => {
+  try {
+    const { subredditName } = context;
+    const now = Date.now();
+    // Reset anchor to current Sunday
+    const anchor = startOfSundayWeekET(now);
+    await redis.set(WEEK_ANCHOR_KEY, anchor.toString());
+    await redis.set(CURRENT_WEEK_KEY, '1');
+    // Clear time offset
+    await redis.set(WEEK_TIME_OFFSET_KEY, '0');
+    // Purge week 1 metadata so it regenerates with new theme
+    await redis.set(SHOWCASE_WEEK_META_KEY(1), '');
+    // Clear the showcase dedupe hash so a new post can be created
+    if (subredditName) {
+      const dedupeHash = `weekly_showcase_posts:${subredditName}`;
+      try { await redis.hDel(dedupeHash, ['1']); } catch {}
+    }
+    // Clear legacy showcase key
+    await redis.set(SHOWCASE_WEEKLY_KEY('', 1), '');
+    console.log('[admin] reset to week 1, anchor:', anchor);
+    res.json({ ok: true, anchor, week: 1 });
+  } catch (e: any) {
+    console.error('[admin:reset-week] error', e?.message);
+    res.status(500).json({ error: e?.message });
+  }
+});
+// --- Admin: clear all frames ---
+// Accepts optional query ?postId=t3_xxx to target a specific post, otherwise uses context.postId
+router.post('/api/admin/clear-frames', async (req, res) => {
+  try {
+    const targetPostId = (req.query.postId as string) || context.postId;
+    if (!targetPostId) return res.status(400).json({ error: 'no postId — pass ?postId=t3_xxx or call from a post context' });
+    // Read current frame keys
+    const listKey = `frames:list:${targetPostId}`;
+    const raw = await redis.get(listKey);
+    const keys: string[] = raw ? JSON.parse(raw) : [];
+    // Delete each frame data entry
+    let deleted = 0;
+    for (const key of keys) {
+      try { await redis.set(`frames:data:${targetPostId}:${key}`, ''); deleted++; } catch {}
+    }
+    // Clear the list
+    await redis.set(listKey, JSON.stringify([]));
+    console.log('[admin] cleared', deleted, 'frames for post', targetPostId);
+    res.json({ ok: true, deleted, postId: targetPostId });
+  } catch (e: any) {
+    console.error('[admin:clear-frames] error', e?.message);
+    res.status(500).json({ error: e?.message });
+  }
+});
+// --- Admin: find posts with frames ---
+router.get('/api/admin/find-frames', async (_req, res) => {
+  try {
+    const { postId } = context;
+    // Try the current post and any recent known post IDs
+    const candidates: string[] = [];
+    if (postId) candidates.push(postId);
+    // Check each candidate
+    const results: { postId: string; frameCount: number; keys: string[] }[] = [];
+    for (const pid of candidates) {
+      const raw = await redis.get(`frames:list:${pid}`);
+      if (raw) {
+        try {
+          const keys = JSON.parse(raw);
+          if (Array.isArray(keys) && keys.length > 0) {
+            results.push({ postId: pid, frameCount: keys.length, keys });
+          }
+        } catch {}
+      }
+    }
+    res.json({ ok: true, currentPostId: postId, posts: results });
+  } catch (e: any) {
+    res.status(500).json({ error: e?.message });
+  }
+});
 // --- Week rollover endpoint ---
 router.post('/api/rollover-week', async (_req,res)=>{
   try {
@@ -2123,7 +2199,7 @@ app.get('/api/draw-config', async (req, res) => {
         { id: 'acuarela', name: 'Watercolor Wash' },
         { id: 'marker', name: 'Airbrush' },
       ];
-      const seedTheme = 'Holy Week';
+      const seedTheme = 'Moving Lines';
       const response: any = {
         ok: true, currentWeek, previousWeek: 0,
         paletteColors: seedPalette,
@@ -2513,7 +2589,7 @@ app.post('/internal/scheduler/weekly-animation', async (req, res) => {
         theme = meta.theme || '';
       } catch {}
     }
-    if (!theme && targetWeek === 1) theme = 'Holy Week';
+    if (!theme && targetWeek === 1) theme = 'Moving Lines';
 
     const frameCount = pixelFrames.length;
     const title = theme
