@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useCallback } from 'react';
+import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import { Canvas } from './components/Canvas';
 import { allBrushPresets, BrushPreset } from './brushes';
 // import { ColorPalette } from './components/ColorPalette';

@@ -190,15 +190,44 @@ function buildDayCommentText(dayOfWeek: number, dateHuman: string, entries: DayF
   return text.trim();
 }
 
-async function getOrCreateWeeklyShowcasePost(postId: string): Promise<string | null> {
-  try {
-    const now = await nowMs();
-    const currentWeek = await ensureCurrentWeek();
-    const redisKey = SHOWCASE_WEEKLY_KEY(postId, currentWeek);
-    const existing = await redis.get(redisKey);
-    if (existing && existing.startsWith('t3_')) return existing;
+// --- ensureWeeklyShowcasePost (Gamino hSetNX pattern) ---
+// Atomically ensures exactly ONE showcase post exists per week per subreddit.
+// Returns the post ID if created or already exists, null on skip/error.
+async function ensureWeeklyShowcasePost(callerPostId?: string): Promise<string | null> {
+  const { subredditName } = context;
+  if (!subredditName) {
+    console.warn('[showcase] no subredditName — skipping');
+    return null;
+  }
 
-    // Build weekly announcement post
+  const now = await nowMs();
+  const currentWeek = await ensureCurrentWeek();
+  const weekKey = String(currentWeek);
+  const dedupeHash = `weekly_showcase_posts:${subredditName}`;
+  let reserved = false;
+
+  try {
+    // Atomic reserve: if weekKey already has a value, skip
+    const reserveResult = await redis.hSetNX(dedupeHash, weekKey, 'pending');
+    reserved = reserveResult === 1;
+
+    if (!reserved) {
+      // Post already exists for this week — return its ID
+      const existingId = await redis.hGet(dedupeHash, weekKey);
+      if (existingId && existingId.startsWith('t3_')) {
+        console.log('[showcase] week', currentWeek, 'post already exists:', existingId);
+        return existingId;
+      }
+      // If value is 'pending' from a failed previous attempt, allow retry
+      if (existingId === 'pending') {
+        console.log('[showcase] previous attempt was pending, retrying...');
+        reserved = true; // allow creation below
+      } else {
+        return existingId || null;
+      }
+    }
+
+    // Build the week metadata
     const anchorStr = await redis.get(WEEK_ANCHOR_KEY);
     const anchorMs = anchorStr ? parseInt(anchorStr, 10) : now;
     const weekBounds = getWeekBoundariesFromAnchor(anchorMs, currentWeek);
@@ -213,7 +242,6 @@ async function getOrCreateWeeklyShowcasePost(postId: string): Promise<string | n
     let directorName: string | null = null;
 
     if (currentWeek === 1) {
-      // Week 1 has no previous voting — use seed defaults
       themeTitle = 'Holy Week';
       paletteName = 'Sunrise';
       paletteColors = ['#FF6B6B', '#4ECDC4', '#45B7D1', '#96CEB4', '#FFEAA7', '#DDA0DD'];
@@ -221,12 +249,13 @@ async function getOrCreateWeeklyShowcasePost(postId: string): Promise<string | n
       brushNames = ['Ink', 'Acrylic Paint', 'Watercolor Wash', 'Airbrush'];
       directorName = 'kinora-app';
     } else {
-      const winnersStr = await redis.get(WEEK_WINNERS_KEY(postId, currentWeek - 1));
+      // Try to read winners from any known canvas post, or use global key
+      const postId = callerPostId || context.postId || '';
+      const winnersStr = postId ? await redis.get(WEEK_WINNERS_KEY(postId, currentWeek - 1)) : null;
       if (winnersStr) {
         try {
           const w = JSON.parse(winnersStr);
           if (w.theme?.title) themeTitle = w.theme.title;
-          // Director = the user who proposed the winning theme bundle
           if (w.theme?.proposedBy) directorName = w.theme.proposedBy;
           if (w.palette) {
             paletteName = w.palette.title || null;
@@ -245,7 +274,6 @@ async function getOrCreateWeeklyShowcasePost(postId: string): Promise<string | n
       ? `🎬 ${themeTitle} | Kinora Week ${currentWeek}`
       : `🎬 Kinora Animations — Week ${currentWeek}`;
 
-    // Store week metadata in Redis so the showcase client can read it
     const weekMeta = {
       week: currentWeek,
       theme: themeTitle || '',
@@ -257,24 +285,27 @@ async function getOrCreateWeeklyShowcasePost(postId: string): Promise<string | n
       startDate,
       endDate,
     };
+
+    // Store metadata in Redis for the showcase client
     await redis.set(SHOWCASE_WEEK_META_KEY(currentWeek), JSON.stringify(weekMeta));
     console.log('[showcase] stored week meta for week', currentWeek);
 
-    const { subredditName } = context;
-    if (!subredditName) {
-      console.warn('[showcase] no subredditName in context');
-      return null;
-    }
+    // Create the Reddit post
     console.log('[showcase] creating weekly custom post:', title);
     const post = await reddit.submitCustomPost({
       subredditName,
       title,
       entry: 'showcase',
+      postData: { weekMeta },
     });
-    await redis.set(redisKey, post.id);
-    console.log('[showcase] weekly custom post created:', post.id);
 
-    // Schedule the weekly animation GIF to be published 6 hours from now
+    // Finalize the dedupe hash with the real post ID
+    await redis.hSet(dedupeHash, { [weekKey]: post.id });
+    // Also keep the legacy key for backward compat
+    await redis.set(SHOWCASE_WEEKLY_KEY('', currentWeek), post.id);
+    console.log('[showcase] weekly post created:', post.id, 'for week', currentWeek);
+
+    // Schedule the weekly animation GIF for the PREVIOUS week
     if (currentWeek > 1) {
       const animKey = `animation:scheduled:w${currentWeek - 1}`;
       const alreadyScheduled = await redis.get(animKey);
@@ -283,19 +314,23 @@ async function getOrCreateWeeklyShowcasePost(postId: string): Promise<string | n
           const sixHours = 6 * 60 * 60 * 1000;
           await scheduler.runJob({
             name: 'weekly-animation',
-            data: { postId, week: currentWeek - 1 },
+            data: { postId: callerPostId || context.postId, week: currentWeek - 1 },
             runAt: new Date(Date.now() + sixHours),
           });
           await redis.set(animKey, 'scheduled');
-          console.log('[showcase] scheduled weekly-animation job for week', currentWeek - 1, 'in 6 hours');
+          console.log('[showcase] scheduled weekly-animation for week', currentWeek - 1);
         } catch (e: any) {
-          console.error('[showcase] failed to schedule animation job:', e?.message);
+          console.error('[showcase] failed to schedule animation:', e?.message);
         }
       }
     }
 
     return post.id;
   } catch (e: any) {
+    // Clean up the reserve on failure so next attempt can retry
+    if (reserved) {
+      try { await redis.hDel(dedupeHash, [weekKey]); } catch {}
+    }
     console.error('[showcase] weekly post failed:', e?.message);
     return null;
   }
@@ -1049,7 +1084,7 @@ router.post('/api/finalize-turn', async (_req, res) => {
         // --- Auto-post to weekly showcase (daily editable comment) ---
         if (stored.mediaUrl) {
           try {
-            const showcaseId = await getOrCreateWeeklyShowcasePost(postId);
+            const showcaseId = await ensureWeeklyShowcasePost(postId);
             if (showcaseId) {
               await addFrameToDailyComment(showcaseId, postId, stored.mediaUrl, state.currentArtist!, week, frameKeys.length);
             }
@@ -2345,6 +2380,25 @@ async function fetchFramePixels(postId: string, frameKey: string): Promise<{ wid
 
   return null;
 }
+
+// --- Weekly Showcase Post cron (fires every Sunday 00:05 UTC) ---
+app.post('/internal/cron/weekly-showcase-post', async (_req, res) => {
+  try {
+    console.log('[cron:weekly-showcase] triggered');
+    const currentWeek = await ensureCurrentWeek();
+    const postId = await ensureWeeklyShowcasePost();
+    if (postId) {
+      console.log('[cron:weekly-showcase] week', currentWeek, 'post:', postId);
+      res.json({ ok: true, week: currentWeek, postId });
+    } else {
+      console.log('[cron:weekly-showcase] week', currentWeek, 'skipped or failed');
+      res.json({ ok: true, week: currentWeek, skipped: true });
+    }
+  } catch (e: any) {
+    console.error('[cron:weekly-showcase] error:', e?.message);
+    res.json({ ok: false, error: e?.message });
+  }
+});
 
 // Internal scheduler endpoint
 app.post('/internal/scheduler/weekly-animation', async (req, res) => {
