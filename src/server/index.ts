@@ -14,10 +14,10 @@ app.use(express.urlencoded({ extended: true }));
 // Middleware for plain text body parsing
 app.use(express.text());
 
-// --- Weekly cycle utilities (Sunday 00:00 ET based week counter) ---
+// --- Weekly cycle utilities (Monday 00:00 ET based week counter) ---
 // Requirements:
-//  - Week 1 starts now (first time this code runs) at the Sunday 00:00:00 ET (EST fixed UTC-5) that contains 'now'.
-//  - Next Sunday 00:00 ET => week 2, etc.
+//  - Week 1 starts at the Monday 00:00:00 ET that contains 'now'.
+//  - Next Monday 00:00 ET => week 2, etc. (weeks run Mon–Sun)
 //  - Auto-advance without manual rollover for consumers (chat, proposals, videos, gallery).
 // Notes:
 //  - We use a fixed offset (UTC-5) to represent ET per user request (no DST complexity for now).
@@ -40,14 +40,16 @@ async function getTimeOffsetMs(): Promise<number> {
 
 async function nowMs(): Promise<number> { return Date.now() + await getTimeOffsetMs(); }
 
-function startOfSundayWeekET(utcMs: number): number {
-  // Convert to pseudo-ET by subtracting fixed offset, go to Sunday 00:00, then add offset back.
+function startOfMondayWeekET(utcMs: number): number {
+  // Convert to pseudo-ET by subtracting fixed offset, find Monday 00:00, then add offset back.
   const etMs = utcMs - ET_FIXED_OFFSET_MS;
   const d = new Date(etMs);
-  const day = d.getUTCDay(); // 0 = Sunday
+  const day = d.getUTCDay(); // 0=Sun, 1=Mon, ..., 6=Sat
+  // Days since last Monday: Sun(0)->6, Mon(1)->0, Tue(2)->1, etc.
+  const daysSinceMonday = (day + 6) % 7;
   d.setUTCHours(0, 0, 0, 0);
-  const sundayStartEtMs = d.getTime() - (day * 24 * 60 * 60 * 1000);
-  return sundayStartEtMs + ET_FIXED_OFFSET_MS; // return as UTC epoch
+  const mondayStartEtMs = d.getTime() - (daysSinceMonday * 24 * 60 * 60 * 1000);
+  return mondayStartEtMs + ET_FIXED_OFFSET_MS; // return as UTC epoch
 }
 
 function computeWeekNumber(anchorStartMs: number, now: number): number {
@@ -84,7 +86,7 @@ async function ensureCurrentWeek(): Promise<number> {
   let anchorStr = await redis.get(WEEK_ANCHOR_KEY);
   if (!anchorStr) {
     // First-time initialization: anchor is the Sunday of current time (ET)
-    const anchor = startOfSundayWeekET(now);
+    const anchor = startOfMondayWeekET(now);
     await redis.set(WEEK_ANCHOR_KEY, anchor.toString());
     await redis.set(CURRENT_WEEK_KEY, '1');
     return 1;
@@ -1761,8 +1763,8 @@ router.post('/api/admin/reset-week', async (_req, res) => {
   try {
     const { subredditName } = context;
     const now = Date.now();
-    // Reset anchor to current Sunday
-    const anchor = startOfSundayWeekET(now);
+    // Reset anchor to current Monday
+    const anchor = startOfMondayWeekET(now);
     await redis.set(WEEK_ANCHOR_KEY, anchor.toString());
     await redis.set(CURRENT_WEEK_KEY, '1');
     // Clear time offset

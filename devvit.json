@@ -55,7 +55,7 @@
       },
       "weekly-showcase-post": {
         "endpoint": "/internal/cron/weekly-showcase-post",
-        "cron": "5 0 * * 0"
+        "cron": "5 0 * * 1"
       }
     }
   },
