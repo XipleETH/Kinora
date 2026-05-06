@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from 'react';
+import { context } from '@devvit/web/client';
 
 interface ShowcaseData {
   week: number;
@@ -12,11 +13,48 @@ interface ShowcaseData {
   endDate: string;
 }
 
+/**
+ * Read week metadata from postData (immutable, set at post creation time).
+ * This ensures each post always shows its own week's data,
+ * even after the current week has advanced.
+ */
+function getWeekMetaFromPostData(): ShowcaseData | null {
+  try {
+    const postData = context.postData;
+    if (!postData || typeof postData !== 'object') return null;
+    const meta = (postData as any).weekMeta;
+    if (!meta || typeof meta !== 'object') return null;
+    // Validate required fields
+    if (typeof meta.week !== 'number') return null;
+    return {
+      week: meta.week,
+      theme: meta.theme || '',
+      paletteName: meta.paletteName || '',
+      paletteColors: Array.isArray(meta.paletteColors) ? meta.paletteColors : [],
+      brushKitName: meta.brushKitName || '',
+      brushNames: Array.isArray(meta.brushNames) ? meta.brushNames : [],
+      directorName: meta.directorName || '',
+      startDate: meta.startDate || '',
+      endDate: meta.endDate || '',
+    };
+  } catch {
+    return null;
+  }
+}
+
 export const ShowcaseApp: React.FC = () => {
   const [data, setData] = useState<ShowcaseData | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
+    // 1. Try to read from postData (immutable, preferred)
+    const embedded = getWeekMetaFromPostData();
+    if (embedded) {
+      setData(embedded);
+      return;
+    }
+
+    // 2. Fallback: fetch from API (for old posts created before postData was added)
     (async () => {
       try {
         const res = await fetch('/api/showcase-data');
@@ -249,3 +287,4 @@ const styles: Record<string, React.CSSProperties> = {
     color: '#888',
   },
 };
+
