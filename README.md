@@ -1,243 +1,127 @@
-## 12FPS (Devvit App)
+# 🎬 Kinora — Collaborative Frame‑by‑Frame Animation on Reddit
 
-Collaborative frame-by-frame animation inside Reddit. Users contribute frames in timed drawing turns, and every week the community votes on the color palette, theme, and special brushes for the next cycle. The result is a community video whose aesthetic is steered by collective decisions.
+Kinora turns a subreddit into a **community animation studio**. Every week the community draws one shared movie together — one frame at a time — under a theme, color palette, brush kit, and "director" chosen by collective voting. When the week ends, all the frames are automatically stitched into an animated GIF and published back to the subreddit.
 
----
-### Goals
-- Encourage coordinated yet asynchronous artistic creation.
-- Enforce constrained resources (palette, brushes) to keep a cohesive weekly style.
-- Integrate native voting + fast in-app state via Redis to close a weekly creative loop.
+Built on **Devvit Web** (Reddit's developer platform). Submitted to the **Reddit "Games with a Hook" Hackathon**.
 
 ---
-### High-Level Flow
-1. Weekly cycle starts (Week N):
-	- Voting phase opens (palette, theme, optional special brushes).
-	- When voting closes we snapshot the config (cached in Redis).
-2. Drawing Sessions (continuous / daily):
-	- Each turn grants an exclusive 2h session (soft lock per user).
-	- The author draws with only the enabled palette + brush modes.
-	- On finish (or early force-end) a PNG/Base64 frame is produced and persisted.
-3. Playback / Gallery:
-	- Frames are listed + played at 6/12/24 FPS.
-	- Each frame shows author, timestamp, week.
-4. New Week:
-	- Config cache is cleared and a new voting round begins.
+
+## Why it fits "Games with a Hook"
+
+Kinora is a **shared creative experience** with retention built into its core loop:
+
+- **The hook = a movie you can only make together.** No single person can finish the animation. You draw your frame on top of the previous artist's frame (onion‑skin guide), then hand the pencil to the next redditor. The payoff — the finished weekly GIF — only exists because the whole community showed up.
+- **Retention mechanics.** A weekly cycle (new theme every Sunday), community voting on next week's palette/theme/brushes/director, timed drawing turns, an onion‑skin that pulls you into "continue the story," and a **weekly animation reveal** that publishes automatically. There's always a reason to come back.
+- **100% user contributions.** Every pixel in every frame is drawn by a redditor. The app contributes only the constraints (palette, brushes) and the stage.
+- **Mobile‑first.** Draw with your finger on your phone in a vertical, full‑screen canvas — the same experience scales up to desktop.
 
 ---
-### Technical Components
+
+## How it works
+
+### 1. Weekly theme cycle
+Each week has a **bundle**: a Theme + a 6‑color Palette + up to 4 Brushes + a Director. Redditors **propose and vote** on bundles for the upcoming week. When nobody proposes (a quiet week), a curated **house preset** is seeded automatically so the canvas is never empty — but any human bundle with a single real vote overtakes it, so the community always wins ties.
+
+The week resets every **Sunday 7:00 PM (Colombia / UTC‑5) = Monday 00:00 UTC**, and the previous week's animation is published a couple of minutes later.
+
+### 2. Drawing turns
+Artists take **exclusive timed turns** (soft lock in Redis) so no two people draw the same frame at once. During a turn you draw on a blank canvas with a faint **onion‑skin** of the previous frame as a guide, using only that week's palette + brushes. Save the frame and it joins the movie.
+
+### 3. Automatic showcase posts
+This is where Kinora leans on Reddit itself:
+
+- A **weekly announcement post** is auto‑created with the theme, palette swatches, brushes, and director.
+- Each user's saved frame is **auto‑posted as an image comment** on the weekly post, grouped by day and artist.
+- When the week ends, all frames are compiled into an **animated GIF** (12 fps) and **auto‑published as a new post** in the subreddit — the community's finished short film.
+
+### 4. Playback
+Browse frames in the gallery, scrub the weekly carousel, or watch the compiled GIF.
+
+---
+
+## Images: native Reddit Media API
+
+Kinora previously (in an earlier hackathon build) stored frame images in **external object storage (Cloudflare R2 / S3‑compatible)**. That path was unreliable inside Devvit's sandbox and often failed to serve images. 
+
+The app now uses **Reddit's native Media API** (`media.upload`) end‑to‑end: drawn frames and the compiled weekly GIF are uploaded to Reddit's own CDN (`i.redd.it`), and only lightweight metadata lives in Redis. This removed the external dependency entirely — **images and GIFs now work reliably**. (A Redis‑only base64 fallback remains for local/dev.)
+
+---
+
+## Mobile adaptation
+
+The canvas and UI were rebuilt to be genuinely usable on a phone:
+
+- **Finger drawing** — one finger draws; two fingers pinch‑zoom and pan. (Previously only a stylus/mouse could draw.)
+- **Vertical 9:16 canvas** that fills the phone screen (Reels/TikTok shape).
+- **Fixed canonical resolution (720×1280)** on every device, so a frame drawn on a phone and one drawn on a desktop are pixel‑compatible — the weekly GIF encoder now includes *every* frame instead of dropping mismatched ones.
+- **Collapsible tools** — a right‑side drawer holds the tool panels and auto‑closes when you pick a tool, leaving the whole screen for drawing. A compact bottom nav replaces the desktop side rail.
+- Desktop keeps the full paper‑sketch UI with the tool panels hugging the canvas.
+
+---
+
+## Tech stack
+
 | Layer | Tech | Role |
 |-------|------|------|
-| WebView (post) | React + Vite | Interactive UI (canvas, gallery, video, voting) |
-| Devvit Server | Node (Vite SSR build) | Internal endpoints: session lock, save frame, collect votes, weekly rollover task |
-| Fast Store | Redis (Devvit integration) | Cache palette/theme, session locks (TTL), vote counters |
-| Frame Storage | R2 / S3 / Base64 object | Persist final frame image |
-| Weekly Config | Redis + JSON fallback | Snapshot of palette + theme + brushes |
+| Post UI (WebView) | React + Vite + Tailwind | Canvas, gallery, video carousel, weekly voting, chat |
+| Server | Devvit Web (Node) | Turn locks, frame save, voting/tally, weekly rollover, showcase + GIF cron |
+| Fast store | Redis (Devvit) | Week anchor, session locks (TTL), vote counters, frame metadata |
+| Image storage | Reddit Media API (`i.redd.it`) | Frame PNGs + weekly animation GIF |
+| GIF encoding | `gifenc` + `upng-js` | Decode frames → resize to 720×1280 → encode 12 fps GIF |
 
 ---
-### Redis / Key Model
-Example keys:
-- `week:current` → active week number.
-- `week:<n>:config` → JSON (palette[], theme, enabled brushes).
-- `session:lock` → userId + start + expiry (2h). TTL=7200s.
-- `votes:palette:<n>` → hash { paletteId: count }.
-- `votes:theme:<n>` → hash { themeId: count }.
-- `votes:brush:<n>` → hash { brushId: count }.
-- `frames:week:<n>` → list of frame IDs.
-Locks use SET NX EX for atomicity; optional renewal guarded by ownership.
+
+## Custom brush engine
+
+A hand‑written HTML‑canvas brush engine (no external art lib): ink/manga pen with dual‑taper, acrylic with simulated bristles, watercolor wash with diffusion/bleed/granulation, airbrush, spray, splatter, smudge, calligraphy, glow, pixel, and multi‑stamp brushes. Weekly constraints cap which brushes are available to keep a cohesive style.
 
 ---
-### Weekly Voting
-1. Open: server seeds candidate palettes/themes (curated or pseudo-random).
-2. User votes (rate-limited per user via Redis INCR + TTL bucket).
-3. Close: cron (or manual endpoint) tallies results → writes `week:<n+1>:config` and updates `week:current`.
-4. UI hydrates from cached new config.
 
-Tie-breaking: earliest threshold (first to reach max) or optional second round.
+## Commands
 
----
-### 2-Hour Turns (Session Lock)
-On “Start Session”:
-1. Server attempts `SET session:lock {userId,t0} NX EX 7200`.
-2. On success returns remaining time for client countdown.
-3. User may end early; server clears lock and records timestamp.
-4. Natural expiry (no heartbeats) auto-frees slot.
-
-No overlap: new user waits until expiry; UI shows “Busy”.
-
----
-### Frame Save Pipeline
-1. Client captures canvas → dataURL PNG (optionally compresses before upload).
-2. POST to `/internal/frame/save` with metadata (week, palette hash, author).
-3. Server validates lock + active week.
-4. Upload to storage (R2, etc.) and push reference + metadata to weekly list.
-5. Invalidate/update cache for listings.
-
----
-### Video Playback
-- Client fetches chronological frame list.
-- Optional prefetch / lazy loading.
-- Interval playback (6/12/24 FPS) + progress bar.
-- Future export: server composition (ffmpeg WASM or backend job).
-
----
-### Brushes & Constraints
-Modes: Solid, Soft, Fade, Spray (experimental others). 
-We apply weekly caps (max size, opacity, jitter, density) from config→Redis to enforce cohesion.
-
----
-### Commands (Inside `twelve-fps/`)
-- `npm run dev` → watch mode (client + server + playtest).
-- `npm run build` → build client and server.
-- `npm run build:client` / `build:server` → individual.
-- `npm run deploy` → build + upload (`devvit upload`).
-- `npm run launch` → publish version.
-- `npm run login` → CLI auth.
-
-Root monorepo:
-- `npm run deploy:devvit` → root build + sync + server build + upload.
-- `npm run deploy:reddit` → orchestrated pipeline (short alias).
-
----
-### WebView Sync Pipeline
-Root app builds with hashed assets. Script `tools/sync-devvit.mjs` copies `dist/index.html` + `dist/assets/` to `twelve-fps/dist/client/`, rewrites `/assets/` → `./assets/`, adds timestamp banner, verifies largest JS tail.
-
----
-### Performance Notes
-- Canvas caps DPR (<=3) to balance sharpness/memory.
-- Spray / Soft brushes use heuristics to limit steps.
-- Large frame images lazy load; images use `object-contain` preserving 540×740 aspect.
-
----
-### Security / Anti-Abuse (Planned)
-- Rate limit votes & frame saves (Redis INCR + TTL).
-- Enforce max image size.
-- Basic content filtering placeholder (future moderation layer).
-- Audit metadata (userId, timestamps) per frame.
-
----
-### Short-Term Roadmap
-- GIF / MP4 export.
-- Local Undo/Redo before submission.
-- Configurable onion-skin overlay.
-- Dynamic palettes with weighting (usage-based curation).
-- Dedicated voting modal UI.
-
----
-### Fast Local Dev
 ```bash
-# root
 npm install
-npm run build        # optional for sync
-npm run sync:devvit  # copy assets into WebView
-cd twelve-fps
-npm run build:server
-npx devvit upload
+npm run dev        # watch client + server + devvit playtest
+npm run build      # build client + server (Vite)
+npm run deploy     # build + devvit upload
+npm run launch     # build + upload + publish
 ```
 
-Live/test mode:
+Install/update on a subreddit you moderate:
+
 ```bash
-cd twelve-fps
-npm run dev
+devvit install <subreddit>
+```
+
+Local UI preview (client only, no Reddit backend):
+
+```bash
+npm run dev:vite   # http://localhost:7474
 ```
 
 ---
-### R2 / S3 Storage Setup
 
-This server can store frame binaries in Cloudflare R2 (S3-compatible). Redis keeps only metadata.
+## Project layout
 
-Env variables read by the server (twelve-fps/src/server/index.ts):
-
-- R2_ENABLED=1
-- R2_BUCKET=12fps-frames
-- R2_ENDPOINT=https://<account-id>.r2.cloudflarestorage.com
-- R2_ACCESS_KEY_ID=<your-access-key-id>
-- R2_SECRET_ACCESS_KEY=<your-secret-access-key>
-- R2_PUBLIC_BASE_URL=https://cdn.example.com/frames (optional; used for HTTP 302 redirects)
-
-Create R2 access keys (Cloudflare Dashboard):
-- R2 → S3 API Tokens → Create API token
-- Grant Object Read/Write on bucket `12fps-frames`
-- After creating, copy the Access Key ID and Secret Access Key. You won’t see the secret again.
-
-Local dev (PowerShell):
-```powershell
-cd twelve-fps
-$env:R2_ENABLED="1"
-$env:R2_BUCKET="12fps-frames"
-$env:R2_ENDPOINT="https://<account-id>.r2.cloudflarestorage.com"
-$env:R2_ACCESS_KEY_ID="<key>"
-$env:R2_SECRET_ACCESS_KEY="<secret>"
-# optional public base for CDN/domain
-$env:R2_PUBLIC_BASE_URL="https://cdn.example.com/frames"
-
-devvit playtest
 ```
-
-Alternatively, create a `.env` in `twelve-fps/` and run with dotenv:
-```powershell
-cd twelve-fps
-npx dotenv -e .env -- devvit playtest
+src/
+  client/           # React post UI
+    app/
+      components/   # Canvas, SidePanels, Header, FrameGallery, VideoPlayer, Chat, PaletteVoting…
+      brushes.ts    # brush presets / engine params
+  server/
+    index.ts        # Devvit Web server: turns, frames, voting, weekly cron, GIF job
+    presets.ts      # house presets (theme list + palette/brush generators) for empty weeks
+  shared/           # shared types
 ```
-
-Production (Devvit):
-You have two ways to provide credentials in production:
-
-1) App Settings (if using Devvit Public API settings)
-- Use the Devvit console or CLI to set app-level settings and the runtime will expose them.
-- CLI (from `twelve-fps/`):
-	- `devvit settings set R2_BUCKET <value>`
-	- `devvit settings set R2_ENDPOINT <value>`
-	- `devvit settings set R2_ACCESS_KEY_ID <value>`
-	- `devvit settings set R2_SECRET_ACCESS_KEY <value>`
-	- `devvit settings set R2_ENABLED 1`
-	- `devvit settings set R2_PUBLIC_BASE_URL <value>` (optional)
-
-2) Redis-based runtime config (no Devvit settings required)
-- The server exposes mod-only endpoints to write config to Redis and use it live without redeploys.
-- In any Reddit post where the app is installed, open the browser DevTools Console and run:
-```js
-await fetch('/api/r2-config', {
-  method: 'POST',
-  headers: { 'content-type': 'application/json' },
-  body: JSON.stringify({
-    enabled: true,
-    bucket: '<your-bucket>',
-    endpoint: 'https://<account-id>.r2.cloudflarestorage.com',
-    accessKeyId: '<ACCESS_KEY_ID>',
-    secretAccessKey: '<SECRET_ACCESS_KEY>',
-    publicBaseUrl: 'https://cdn.example.com/frames' // optional
-  })
-});
-```
-- To inspect what’s currently active (mod-only):
-```js
-await (await fetch('/api/r2-config')).json();
-```
-- Notes:
-  - First-time setup is allowed even if the app’s internal mod allowlist is empty (bootstrap). Subsequent updates require being in the allowlist (`/api/mods`).
-
-Behavior:
-- If R2 variables are valid, `/api/finalize-turn` and `/api/upload-frame` upload to R2; listings return a stable `src` per frame.
-- If not configured, the server falls back to Redis-only storage (legacy `dataUrl`).
-
-Health check:
-- After configurar los secretos en producción, valida R2 con:
-	- GET `/api/r2-health` → responde `{ ok, putOK, getOK, deleteOK, bucket, endpoint }`
-	- ok=true confirma credenciales y acceso de escritura/lectura.
 
 ---
-### Common Issues
-| Symptom | Cause | Fix |
-|---------|-------|-----|
-| WebView not updating | Forgot sync after root build | `npm run build && npm run sync:devvit` |
-| Old palette showing | Redis cache not invalidated | Run weekly rollover job / delete week keys |
-| Turn not releasing | Client abandoned session | Wait TTL or force-release endpoint |
+
+## Status
+
+Concept‑complete and installed live on r/Kinora. Recent updates for the hackathon: native Reddit Media API storage, automatic frame + weekly‑GIF posts, mobile finger‑drawing with a vertical fixed‑resolution canvas, community voting with house‑preset fallback, and a paper‑sketch UI polished for both mobile and desktop.
 
 ---
+
 ### License
-BSD-3-Clause (subject to change if needed).
-
----
-### Credits
-Built on Devvit + Reddit community. Inspired by pixel-art collabs and jam sessions.
-
+BSD‑3‑Clause.

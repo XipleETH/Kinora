@@ -34,9 +34,9 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({ frames }) => {
       <div className="flex items-center justify-center gap-4">
         <button onClick={()=> prev && setFocusWeek(prev.week)} disabled={!prev} className={`p-2 rounded-full border border-white/20 text-white/70 hover:text-white hover:bg-white/10 ${!prev? 'opacity-30 cursor-not-allowed':''}`}><ChevronLeft className="w-5 h-5"/></button>
         <div className="flex gap-8 flex-wrap justify-center max-w-full">
-          {prev && <WeekVideo frames={prev.frames} title={`Week ${prev.week}`}/>} 
-          {current && <WeekVideo frames={current.frames} title={`Week ${current.week}`}/>} 
-          {next && <WeekVideo frames={next.frames} title={`Week ${next.week}`}/>}
+          {prev && <div className="hidden md:block"><WeekVideo frames={prev.frames} title={`Week ${prev.week}`}/></div>}
+          {current && <WeekVideo frames={current.frames} title={`Week ${current.week}`}/>}
+          {next && <div className="hidden md:block"><WeekVideo frames={next.frames} title={`Week ${next.week}`}/></div>}
         </div>
         <button onClick={()=> next && setFocusWeek(next.week)} disabled={!next} className={`p-2 rounded-full border border-white/20 text-white/70 hover:text-white hover:bg-white/10 ${!next? 'opacity-30 cursor-not-allowed':''}`}><ChevronRight className="w-5 h-5"/></button>
       </div>

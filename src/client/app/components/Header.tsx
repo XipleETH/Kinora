@@ -54,13 +54,12 @@ export const Header: React.FC<HeaderProps> = ({ currentView, setCurrentView }) =
 
   return (
     <aside
-      className="fixed top-0 left-0 h-screen w-[60px] flex flex-col bg-black/40 backdrop-blur-md border-r border-white/10 shadow-xl z-40 overflow-hidden"
+      className="fixed top-0 left-0 h-screen w-[60px] hidden md:flex flex-col bg-[#FAF3E0] panel-hatch border-r-2 border-black shadow-xl z-40 overflow-hidden"
     >
-      <div className="flex items-center gap-2 px-3 py-4 select-none border-b border-white/10">
-        <div className="w-9 h-9 bg-gradient-to-tr from-purple-500 via-fuchsia-500 to-pink-500 rounded-xl flex items-center justify-center shadow-inner flex-shrink-0">
+      <div className="flex items-center justify-center px-2 py-4 select-none border-b-2 border-black">
+        <div className="w-9 h-9 bg-gradient-to-tr from-purple-500 via-fuchsia-500 to-pink-500 rounded-xl flex items-center justify-center shadow-inner flex-shrink-0 border-2 border-black">
           <LogoKinora className="w-5 h-5 text-white" />
         </div>
-        <span className="text-lg font-extrabold tracking-tight bg-gradient-to-tr from-white via-fuchsia-200 to-purple-300 bg-clip-text text-transparent drop-shadow-sm opacity-0 group-hover/side:opacity-100 transition-opacity duration-200">Kinora</span>
       </div>
       <nav className="flex-1 overflow-y-auto px-2 py-4 flex flex-col gap-2">
         {navigation.map(({ key, label, icon: Icon }) => {
@@ -69,23 +68,18 @@ export const Header: React.FC<HeaderProps> = ({ currentView, setCurrentView }) =
             <button
               key={key}
               onClick={() => setCurrentView(key as any)}
-              className={`group/item relative flex items-center rounded-md px-3 py-2 text-sm font-medium border transition outline-none focus:ring-2 focus:ring-white/50 ${active ? 'bg-white/25 border-white/60 text-white shadow-inner' : 'bg-white/10 border-white/20 text-white/70 hover:bg-white/20 hover:text-white'}`}
+              title={label}
+              style={active ? { backgroundColor: '#FDE047' } : undefined}
+              className="pencil-btn flex items-center justify-center rounded-md py-2 outline-none focus:ring-2 focus:ring-black/40"
               aria-label={label}
             >
-              <Icon className={`w-5 h-5 flex-shrink-0 ${active ? 'text-white' : 'text-white/70 group-hover/item:text-white'} transition-colors`} />
-              {/* Label collapses its width instead of just fading to keep icons centered */}
-              <span className="ml-2 whitespace-nowrap overflow-hidden w-0 opacity-0 group-hover/side:w-auto group-hover/side:opacity-100 transition-all duration-200">{label}</span>
-              {/* Tooltip when collapsed (only show if not hovered side) */}
-              <span className="pointer-events-none absolute left-full top-1/2 -translate-y-1/2 ml-2 px-2 py-1 rounded bg-black/70 text-white text-xs opacity-0 group-hover/side:opacity-0 group-hover/item:opacity-100 transition-opacity duration-200">
-                {label}
-              </span>
+              <Icon className="w-5 h-5 flex-shrink-0 text-black" />
             </button>
           );
         })}
       </nav>
-      <div className="px-3 py-3 text-[10px] text-white/40 border-t border-white/10 font-mono tracking-wide flex items-center gap-2">
-        <ChevronRight className="w-3 h-3 text-white/30" />
-        <span className="opacity-0 group-hover/side:opacity-100 transition-opacity duration-200">session</span>
+      <div className="px-2 py-3 text-[10px] text-black/40 border-t-2 border-black font-mono tracking-wide flex items-center justify-center gap-1">
+        <ChevronRight className="w-3 h-3 text-black/40" />
       </div>
     </aside>
   );

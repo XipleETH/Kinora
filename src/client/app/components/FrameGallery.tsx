@@ -271,7 +271,7 @@ export const FrameGallery: React.FC<FrameGalleryProps> = ({ frames, pendingFrame
               <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-6 gap-2">
                 {modFrames.map(mf=> (
                   <div key={mf.key} className="bg-white/5 border border-white/10 rounded-lg overflow-hidden">
-                    <div className="aspect-[480/640] bg-black/40">
+                    <div className="aspect-[9/16] bg-black/40">
                       <img src={mf.url} alt={mf.key} className="w-full h-full object-contain" />
                     </div>
                     <div className="p-2">
@@ -303,7 +303,7 @@ export const FrameGallery: React.FC<FrameGalleryProps> = ({ frames, pendingFrame
                 <div
                   className="relative bg-white/10 backdrop-blur-sm rounded-2xl overflow-hidden border border-yellow-400/40 hover:bg-white/20 transition-all duration-300"
                 >
-                  <div className="relative aspect-[480/640] bg-black/40 flex items-center justify-center">
+                  <div className="relative aspect-[9/16] bg-black/40 flex items-center justify-center">
                     <img
                       src={pendingFrame.imageData}
                       alt="Pending frame"

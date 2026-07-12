@@ -104,7 +104,7 @@ export const Chat:React.FC<ChatProps> = ({ currentWeek, currentUser }) => {
   const onKey = (e:React.KeyboardEvent<HTMLInputElement>)=>{ if(e.key==='Enter'){ e.preventDefault(); send(); } };
 
   return (
-    <div className="flex flex-col h-full max-h-[540px] bg-black/30 rounded-xl border border-white/10">
+    <div className="flex flex-col h-[calc(100dvh-120px)] md:h-full md:max-h-[540px] bg-black/30 rounded-xl border border-white/10">
       <div className="px-4 py-2 border-b border-white/10 flex items-center gap-2">
   <h3 className="text-white font-semibold text-lg">Chat Semana {week}</h3>
   <span className={`text-xs ${connected? 'text-green-400':'text-yellow-400'}`}>{connected? 'en vivo':'conectando...'}</span>

@@ -12,15 +12,24 @@ html, body {
 	min-height: 100%;
 }
 
-/* Frame media containers (consistent aspect 480x640) */
+/* Frame media containers (consistent aspect 16:9 landscape) */
 .frame-aspect {
-	aspect-ratio: 480 / 640;
+	aspect-ratio: 9 / 16;
 	position: relative;
 }
 
-/* Ensure content starts to the right of the fixed 60px sidebar */
-body {
-	padding-left: 60px;
+/* Ensure content starts to the right of the fixed 60px sidebar (desktop only).
+   On mobile the rail is hidden and a bottom nav bar is used, so no left padding. */
+@media (min-width: 768px) {
+	body {
+		padding-left: 60px;
+	}
+}
+/* Room for the mobile bottom nav bar so content isn't hidden behind it. */
+@media (max-width: 767px) {
+	body {
+		padding-bottom: 56px;
+	}
 }
 
 /* ---------------- Pencil / Animation Paper Theme ---------------- */
@@ -197,7 +206,7 @@ body {
 .clapper-grid { display: grid; grid-template-columns: repeat(auto-fill,minmax(160px,1fr)); gap: 10px; }
 .clapper-frame-card { border: 2px solid var(--ink); border-radius: 10px; background: var(--paper-bg); box-shadow: 1px 1px 0 var(--ink); overflow: hidden; position: relative; }
 .clapper-frame-card:hover { transform: translate(-2px,-2px); box-shadow: 3px 3px 0 var(--ink); }
-.clapper-thumb { aspect-ratio: 480 / 640; background: #222; display: flex; align-items: center; justify-content: center; }
+.clapper-thumb { aspect-ratio: 9 / 16; background: #222; display: flex; align-items: center; justify-content: center; }
 .clapper-thumb img { width: 100%; height: 100%; object-fit: contain; }
 .clapper-frame-meta { padding: 4px 6px 6px 6px; }
 .vote-bar { display: flex; align-items: center; justify-content: flex-end; gap: 6px; margin-top: 4px; }

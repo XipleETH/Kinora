@@ -9,7 +9,7 @@ import { VideoPlayer } from './components/VideoPlayer';
 import { PaletteVoting } from './components/PaletteVoting';
 import { Chat } from './components/Chat'; // <-- Import Chat component
 // Header removed: navigation moved into SidePanels
-import { ZoomIn, ZoomOut } from 'lucide-react';
+import { ZoomIn, ZoomOut, PencilRuler, X, Palette, Play, Image as ImgIcon, Vote, MessageCircle } from 'lucide-react';
 
 // Simple onion icon (layered rings) replacing Layers icon
 const OnionIcon: React.FC<{ className?: string }> = ({ className }) => (
@@ -80,6 +80,32 @@ function App() {
   const [tool, setTool] = useState<'draw' | 'erase' | 'fill'>('draw');
   const [zoom, setZoom] = useState(1);
   const [onionOpacity, setOnionOpacity] = useState(0.35);
+  // Mobile responsive layout + right-side tools drawer
+  const [isMobile, setIsMobile] = useState<boolean>(() => {
+    try { return typeof window !== 'undefined' && !!window.matchMedia && window.matchMedia('(max-width: 767px)').matches; } catch { return false; }
+  });
+  const [toolsDrawerOpen, setToolsDrawerOpen] = useState(false);
+  useEffect(() => {
+    if (typeof window === 'undefined' || !window.matchMedia) return;
+    const mq = window.matchMedia('(max-width: 767px)');
+    const on = () => setIsMobile(mq.matches);
+    on();
+    try { mq.addEventListener('change', on); } catch { (mq as any).addListener(on); }
+    return () => { try { mq.removeEventListener('change', on); } catch { (mq as any).removeListener(on); } };
+  }, []);
+  // Measure the desktop side-panels height so the canvas can end level with them.
+  const sidePanelsRef = useRef<HTMLDivElement>(null);
+  const [panelsHeight, setPanelsHeight] = useState<number | undefined>(undefined);
+  useEffect(() => {
+    if (isMobile) { setPanelsHeight(undefined); return; }
+    const el = sidePanelsRef.current;
+    if (!el || typeof ResizeObserver === 'undefined') return;
+    const update = () => setPanelsHeight(el.getBoundingClientRect().height || undefined);
+    update();
+    const ro = new ResizeObserver(update);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [isMobile]);
   // Dynamic weekly tools from backend
   const [allowedBrushIds, setAllowedBrushIds] = useState<string[] | undefined>(undefined);
   const [paletteColors, setPaletteColors] = useState<string[] | undefined>(undefined);
@@ -620,6 +646,51 @@ function App() {
     return `${h}:${m}:${s}`;
   };
 
+  // SidePanels shared by the desktop inline rail and the mobile right drawer.
+  // On mobile, picking a tool / color / brush closes the drawer so the canvas is clear.
+  const sidePanelsNode = (
+    <SidePanels
+      side={paletteSide}
+      toggleSide={() => setPaletteSide(p => p === 'right' ? 'left' : 'right')}
+      order={panelsOrder}
+      setOrder={setPanelsOrder}
+      tool={tool}
+      setTool={(t) => { setTool(t); setToolsDrawerOpen(false); }}
+      brushSize={brushSize}
+      setBrushSize={setBrushSize}
+      brushSpacing={brushSpacing}
+      setBrushSpacing={setBrushSpacing}
+      brushOpacity={brushOpacity}
+      setBrushOpacity={setBrushOpacity}
+      brushPresetId={brushPresetId}
+      setBrushPresetId={(id) => { setBrushPresetId(id); setToolsDrawerOpen(false); }}
+      colors={currentPalette}
+      activeColor={activeColor}
+      setActiveColor={(c) => { setActiveColor(c); setToolsDrawerOpen(false); }}
+      currentWeek={currentWeek}
+      onSave={saveFrame}
+      onClear={clearCanvas}
+      onUndo={undo}
+      disabled={!(turnInfo && turnInfo.currentArtist === currentUser) || timeLeft === 0}
+      timeLeft={timeLeft}
+      onStartTurn={async () => { try { await fetch('/api/turn',{ method:'POST', headers:{'Content-Type':'application/json','X-User': currentUser } as any, body: JSON.stringify({ action:'start', user: currentUser }) }); const r= await fetch('/api/turn', { headers: { 'X-User': currentUser } as any }); if(r.ok) { setTurnInfo(await r.json()); startedByMeRef.current = true; } } catch {} }}
+      onFinalizeTurn={forceEndSession}
+      canStart={Boolean(turnInfo && !turnInfo.currentArtist)}
+      isArtist={Boolean(turnInfo && turnInfo.currentArtist === currentUser)}
+      currentArtist={turnInfo?.currentArtist || null}
+      allowedBrushIds={allowedBrushIds}
+    />
+  );
+
+  // Compact bottom navigation for mobile (replaces the hidden 60px left rail).
+  const mobileNav = ([
+    { key: 'draw', label: 'Draw', Icon: Palette },
+    { key: 'gallery', label: 'Gallery', Icon: ImgIcon },
+    { key: 'video', label: 'Video', Icon: Play },
+    { key: 'voting', label: 'Vote', Icon: Vote },
+    { key: 'chat', label: 'Chat', Icon: MessageCircle },
+  ] as const);
+
   return (
   <div className={`min-h-screen pencil-theme ${isEmbedded ? 'embedded-mode' : ''}`}>
       {/* Deployment badge para verificar nuevo build en Reddit */}
@@ -640,46 +711,21 @@ function App() {
   {/* Reddit banner removed */}
       
   <Header currentView={currentView} setCurrentView={setCurrentView} />
-  <div className="max-w-6xl mx-auto px-3 pb-4">
+  <div className={currentView === 'draw' ? 'w-full md:pl-[68px] px-1 md:pr-3 pb-4' : 'max-w-6xl mx-auto px-3 pb-4'}>
         {/* Turn / Lobby banner */}
   {/* Removed top status banner (User / Artist / Ends in) */}
         {currentView === 'draw' && (
-          <div className={`w-full flex justify-center gap-6 ${paletteSide === 'left' ? 'flex-row' : 'flex-row-reverse'}`}>
-            <SidePanels
-              side={paletteSide}
-              toggleSide={() => setPaletteSide(p => p === 'right' ? 'left' : 'right')}
-              order={panelsOrder}
-              setOrder={setPanelsOrder}
-              tool={tool}
-              setTool={setTool}
-              brushSize={brushSize}
-              setBrushSize={setBrushSize}
-              brushSpacing={brushSpacing}
-              setBrushSpacing={setBrushSpacing}
-              brushOpacity={brushOpacity}
-              setBrushOpacity={setBrushOpacity}
-                brushPresetId={brushPresetId}
-                setBrushPresetId={setBrushPresetId}
-              colors={currentPalette}
-              activeColor={activeColor}
-              setActiveColor={setActiveColor}
-              currentWeek={currentWeek}
-              onSave={saveFrame}
-              onClear={clearCanvas}
-              onUndo={undo}
-              disabled={!(turnInfo && turnInfo.currentArtist === currentUser) || timeLeft === 0}
-              timeLeft={timeLeft}
-              // After a successful start, mark explicit ownership to enable re-claim resilience if needed
-              onStartTurn={async () => { try { await fetch('/api/turn',{ method:'POST', headers:{'Content-Type':'application/json','X-User': currentUser } as any, body: JSON.stringify({ action:'start', user: currentUser }) }); const r= await fetch('/api/turn', { headers: { 'X-User': currentUser } as any }); if(r.ok) { setTurnInfo(await r.json()); startedByMeRef.current = true; } } catch {} }}
-              onFinalizeTurn={forceEndSession}
-              canStart={Boolean(turnInfo && !turnInfo.currentArtist)}
-              isArtist={Boolean(turnInfo && turnInfo.currentArtist === currentUser)}
-              currentArtist={turnInfo?.currentArtist || null}
-              allowedBrushIds={allowedBrushIds}
-            />
-            <div ref={canvasCardRef}>
-              <div className="flex items-start gap-4">
-                {paletteSide === 'right' && (
+          <div className={`w-full flex items-start justify-center gap-2 md:gap-4 ${paletteSide === 'left' ? 'flex-row' : 'flex-row-reverse'}`}>
+            {/* Desktop inline tools rail — on mobile the tools live in the right drawer.
+                shrink-0 + justify-center keeps the panels hugging the (narrow portrait) canvas. */}
+            {!isMobile && (
+              <div ref={sidePanelsRef} className="shrink-0">
+                {sidePanelsNode}
+              </div>
+            )}
+            <div ref={canvasCardRef} className="shrink-0">
+              <div className="flex items-start gap-2 md:gap-4">
+                {!isMobile && paletteSide === 'right' && (
                   <div className="flex flex-col gap-2 pt-2">
                     <div className="sketch-border panel-hatch rounded-2xl p-3 flex flex-col items-center gap-3 select-none">
                       <div className="flex flex-col items-center gap-1">
@@ -713,7 +759,7 @@ function App() {
                     </div>
                   </div>
                 )}
-                <div className="inline-block">
+                <div className="flex justify-center">
                     <Canvas
                       key={`canvas-${turnInfo?.currentArtist || 'none'}-${frames.length ? frames[frames.length-1].key : 'empty'}`}
                       ref={canvasRef}
@@ -728,6 +774,8 @@ function App() {
                       tool={tool}
                       onBeforeMutate={snapshotCanvas}
                       zoom={zoom}
+                      onZoomChange={setZoom}
+                      maxHeight={!isMobile ? panelsHeight : undefined}
                       // Only show onion (previous frame) to the active artist as a faint guide
                       // Filter to current week so new weeks start with a blank canvas
                       onionImage={(turnInfo && turnInfo.currentArtist === currentUser && currentWeekFrames.length) ? currentWeekFrames[currentWeekFrames.length-1]?.imageData : undefined}
@@ -737,7 +785,7 @@ function App() {
                       restoreImage={(turnInfo && turnInfo.currentArtist === currentUser) ? draftImage : (currentWeekFrames.length ? currentWeekFrames[currentWeekFrames.length-1]?.imageData : null)}
                     />
                 </div>
-                {paletteSide === 'left' && (
+                {!isMobile && paletteSide === 'left' && (
                   <div className="flex flex-col gap-2 pt-2">
                     <div className="sketch-border panel-hatch rounded-2xl p-3 flex flex-col items-center gap-3 select-none">
                       <div className="flex flex-col items-center gap-1">
@@ -776,6 +824,51 @@ function App() {
           </div>
         )}
 
+        {/* MOBILE: floating tools button + right slide-in drawer (auto-closes on tool pick) */}
+        {isMobile && currentView === 'draw' && !toolsDrawerOpen && (
+          <button
+            onClick={() => setToolsDrawerOpen(true)}
+            aria-label="Open tools"
+            style={{ position: 'fixed', right: '8px', top: '50%', transform: 'translateY(-50%)' }}
+            className="z-40 sketch-border rounded-full p-3 bg-[#FAF3E0] text-black shadow-[2px_2px_0_0_#000]"
+          >
+            <PencilRuler className="w-5 h-5" />
+          </button>
+        )}
+        {isMobile && currentView === 'draw' && toolsDrawerOpen && (
+          <div className="fixed inset-0 z-50" onClick={() => setToolsDrawerOpen(false)}>
+            <div className="absolute inset-0 bg-black/40" />
+            <div
+              className="absolute right-0 top-0 h-full max-w-[88%] overflow-y-auto p-3 pt-10 bg-[#FAF3E0] border-l-2 border-black shadow-[-4px_0_0_0_rgba(0,0,0,0.35)]"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <button
+                onClick={() => setToolsDrawerOpen(false)}
+                aria-label="Close tools"
+                style={{ position: 'absolute', top: '8px', right: '8px' }}
+                className="z-10 sketch-border rounded-full p-1.5 bg-white text-black"
+              >
+                <X className="w-4 h-4" />
+              </button>
+              {/* Onion opacity (mobile) — the desktop slider column is hidden here */}
+              {frames.length > 0 && (
+                <div className="mb-3 flex items-center gap-2 sketch-border rounded-xl p-2 bg-white/60">
+                  <OnionIcon className="w-4 h-4 text-black shrink-0" />
+                  <input
+                    type="range" min={0} max={100}
+                    value={Math.round(onionOpacity*100)}
+                    onChange={(e) => (turnInfo && turnInfo.currentArtist === currentUser) ? setOnionOpacity(parseInt(e.target.value,10)/100) : undefined}
+                    disabled={!(turnInfo && turnInfo.currentArtist === currentUser) || !frames.length}
+                    aria-label="Onion opacity"
+                    className="flex-1 accent-black cursor-pointer"
+                  />
+                </div>
+              )}
+              {sidePanelsNode}
+            </div>
+          </div>
+        )}
+
         {currentView === 'gallery' && (
           <FrameGallery
             frames={frames}
@@ -796,6 +889,26 @@ function App() {
           <Chat currentWeek={currentWeek} currentUser={currentUser} />
         )}
       </div>
+
+      {/* MOBILE: bottom navigation bar (replaces the hidden 60px left rail) */}
+      {isMobile && (
+        <nav className="fixed bottom-0 left-0 right-0 z-40 flex items-stretch justify-around h-[52px] bg-[#FAF3E0] panel-hatch border-t-2 border-black">
+          {mobileNav.map(({ key, label, Icon }) => {
+            const active = currentView === key;
+            return (
+              <button
+                key={key}
+                onClick={() => setCurrentView(key as any)}
+                aria-label={label}
+                className={`flex-1 flex flex-col items-center justify-center gap-0.5 text-[10px] font-semibold ${active ? 'text-black' : 'text-black/50'}`}
+              >
+                <Icon className="w-5 h-5" />
+                <span>{label}</span>
+              </button>
+            );
+          })}
+        </nav>
+      )}
     </div>
   );
 }

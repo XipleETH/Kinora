@@ -2,6 +2,7 @@ import express from 'express';
 import { InitResponse, IncrementResponse, DecrementResponse } from '../shared/types/api';
 import { redis, reddit, createServer, context, getServerPort, media, scheduler } from '@devvit/web/server';
 import { createPost } from './core/post';
+import { getHouseBundle, houseWinnersForWeek, buildHouseProposals, HOUSE_DIRECTOR } from './presets';
 import crypto from 'node:crypto';
 import { RichTextBuilder } from '@devvit/shared-types/richtext/RichTextBuilder.js';
 
@@ -14,22 +15,26 @@ app.use(express.urlencoded({ extended: true }));
 // Middleware for plain text body parsing
 app.use(express.text());
 
-// --- Weekly cycle utilities (Monday 00:00 ET based week counter) ---
+// --- Weekly cycle utilities (Monday 00:00 UTC week counter) ---
 // Requirements:
-//  - Week 1 starts at the Monday 00:00:00 ET that contains 'now'.
-//  - Next Monday 00:00 ET => week 2, etc. (weeks run Mon–Sun)
+//  - Weeks reset every Monday 00:00:00 UTC, which is Sunday 7:00 PM Colombia (UTC-5).
+//    The weekly showcase post cron ("5 0 * * 1" = Monday 00:05 UTC = Sunday 7:05 PM
+//    Colombia) therefore fires 5 minutes AFTER the reset.
+//  - Week 1 starts at the Monday 00:00 UTC that contains 'now'; next Monday => week 2 (weeks run Mon–Sun UTC).
 //  - Auto-advance without manual rollover for consumers (chat, proposals, videos, gallery).
 // Notes:
-//  - We use a fixed offset (UTC-5) to represent ET per user request (no DST complexity for now).
 //  - Anchor is stored in Redis so restarts preserve numbering.
 //  - A manual rollover endpoint still exists but is optional.
 const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
-const ET_FIXED_OFFSET_MS = 5 * 60 * 60 * 1000; // Treat ET as constant UTC-5
+// Offset applied when snapping to the Monday boundary. 0 => Monday 00:00 UTC
+// (= Sunday 7:00 PM Colombia). Change this only to move the reset moment.
+const WEEK_BOUNDARY_OFFSET_MS = 0;
 const WEEK_ANCHOR_KEY = 'week:anchor:startMs'; // UTC ms of start of week 1
 const CURRENT_WEEK_KEY = 'week:current:number'; // cached current week number
 const WEEK_TIME_OFFSET_KEY = 'week:timeOffsetMs'; // simulation offset ms
 const WEEK_PROPOSALS_KEY = (postId: string, w: number) => `proposals:${postId}:week:${w}`;
 const WEEK_WINNERS_KEY = (postId: string, w: number) => `week:winners:${postId}:${w}`;
+const WEEK_SEEDED_KEY = (postId: string, w: number) => `week:seeded:${postId}:${w}`;
 
 async function getTimeOffsetMs(): Promise<number> {
   const raw = await redis.get(WEEK_TIME_OFFSET_KEY);
@@ -41,15 +46,16 @@ async function getTimeOffsetMs(): Promise<number> {
 async function nowMs(): Promise<number> { return Date.now() + await getTimeOffsetMs(); }
 
 function startOfMondayWeekET(utcMs: number): number {
-  // Convert to pseudo-ET by subtracting fixed offset, find Monday 00:00, then add offset back.
-  const etMs = utcMs - ET_FIXED_OFFSET_MS;
-  const d = new Date(etMs);
+  // Snap to the Monday 00:00 UTC boundary at or before utcMs.
+  // (Monday 00:00 UTC = Sunday 7:00 PM Colombia. Offset is 0 = pure UTC.)
+  const shifted = utcMs - WEEK_BOUNDARY_OFFSET_MS;
+  const d = new Date(shifted);
   const day = d.getUTCDay(); // 0=Sun, 1=Mon, ..., 6=Sat
   // Days since last Monday: Sun(0)->6, Mon(1)->0, Tue(2)->1, etc.
   const daysSinceMonday = (day + 6) % 7;
   d.setUTCHours(0, 0, 0, 0);
-  const mondayStartEtMs = d.getTime() - (daysSinceMonday * 24 * 60 * 60 * 1000);
-  return mondayStartEtMs + ET_FIXED_OFFSET_MS; // return as UTC epoch
+  const mondayStartMs = d.getTime() - (daysSinceMonday * 24 * 60 * 60 * 1000);
+  return mondayStartMs + WEEK_BOUNDARY_OFFSET_MS;
 }
 
 function computeWeekNumber(anchorStartMs: number, now: number): number {
@@ -62,11 +68,17 @@ function getWeekBoundariesFromAnchor(anchorStartMs: number, week: number) {
   return { startMs, endMs: startMs + WEEK_MS - 1 };
 }
 
-function pickWinner<T extends { votes: number; proposedAt: number }>(items: T[]): T | undefined {
+function pickWinner<T extends { votes: number; proposedAt: number; house?: boolean }>(items: T[]): T | undefined {
   return items.reduce((b, i) => {
     if (!b) return i;
     if (i.votes > b.votes) return i;
-    if (i.votes === b.votes && i.proposedAt < b.proposedAt) return i;
+    if (i.votes < b.votes) return b;
+    // Equal votes: a human proposal always beats a house (auto-seeded) one so
+    // the house bundle is only a floor. Otherwise the earliest wins.
+    const bHouse = !!(b as any).house, iHouse = !!(i as any).house;
+    if (bHouse && !iHouse) return i;
+    if (iHouse && !bHouse) return b;
+    if (i.proposedAt < b.proposedAt) return i;
     return b;
   }, undefined as T | undefined);
 }
@@ -79,6 +91,48 @@ function normalizeProposalType(raw: any): string {
   if (['brushkit','brush-kit','brushes','pinceles','pincel','brushes-kit'].includes(t)) return 'brushKit';
   if (['theme','tema','motif'].includes(t)) return 'theme';
   return raw;
+}
+
+// Ensure the week's ballot is never empty: if nobody has proposed a THEME yet,
+// inject a house bundle (theme + palette + brushes, 1 vote each) so both the
+// voting screen and the resulting weekly config are never blank. The house
+// bundle loses vote ties to any human bundle (see pickWinner), so it only acts
+// as a floor that promotes participation. Idempotent per (postId, week).
+function proposalsHaveHouse(arr: any[]): boolean {
+  return Array.isArray(arr) && arr.some((p: any) => p?.house === true || (typeof p?.id === 'string' && p.id.startsWith('house_')));
+}
+
+async function ensureWeekSeeded(postId: string, week: number): Promise<void> {
+  if (!postId || week < 1) return;
+  try {
+    if (await redis.get(WEEK_SEEDED_KEY(postId, week))) return;
+    const key = WEEK_PROPOSALS_KEY(postId, week);
+    const raw = await redis.get(key);
+    const proposals: any[] = raw ? JSON.parse(raw) : [];
+    // Always seed the house floor once per week — a COMPLETE, votable bundle — so the
+    // ballot is never empty, regardless of any partial/lone human proposals. The house
+    // loses vote ties to humans (pickWinner) and its vote cannot be stacked (see the
+    // proposal vote endpoint), so it only wins when unopposed.
+    if (!proposalsHaveHouse(proposals)) {
+      const bounds = await getAccurateWeekBoundaries(week);
+      const proposedAt = bounds.startMs || (await nowMs());
+      const house = buildHouseProposals(week, proposedAt);
+      // Re-read immediately before writing to shrink the lost-update window against a
+      // concurrent human proposal POST. This is not fully atomic (get+set are two
+      // commands with no CAS/Lua here), so an extremely narrow race can still drop a
+      // human proposal — but the ballot always keeps a COMPLETE house bundle, and this
+      // matches the app's existing read-modify-write concurrency model for proposals.
+      const raw2 = await redis.get(key);
+      const proposals2: any[] = raw2 ? JSON.parse(raw2) : [];
+      if (!proposalsHaveHouse(proposals2)) {
+        await redis.set(key, JSON.stringify([...house, ...proposals2]));
+        console.log('[seed] house bundle seeded for week', week, 'postId', postId);
+      }
+    }
+    await redis.set(WEEK_SEEDED_KEY(postId, week), '1');
+  } catch (e: any) {
+    console.error('[seed] ensureWeekSeeded error', e?.message);
+  }
 }
 
 async function ensureCurrentWeek(): Promise<number> {
@@ -244,31 +298,28 @@ async function ensureWeeklyShowcasePost(callerPostId?: string): Promise<string |
     let directorName: string | null = null;
 
     if (currentWeek === 1) {
-      themeTitle = 'Moving Lines';
-      paletteName = 'Sunrise';
-      paletteColors = ['#FF6B6B', '#4ECDC4', '#45B7D1', '#96CEB4', '#FFEAA7', '#DDA0DD'];
-      brushKitName = 'Classic';
-      brushNames = ['Ink', 'Acrylic Paint', 'Watercolor Wash', 'Airbrush'];
-      directorName = 'kinora-app';
+      const hb = getHouseBundle(1);
+      themeTitle = hb.theme.name;
+      paletteName = hb.palette.name;
+      paletteColors = hb.palette.colors;
+      brushKitName = hb.brushKit.name;
+      brushNames = hb.brushKit.names;
+      directorName = hb.director;
     } else {
-      // Try to read winners from any known canvas post, or use global key
+      // Resolve previous week's winners — never empty (house preset fills gaps).
       const postId = callerPostId || context.postId || '';
-      const winnersStr = postId ? await redis.get(WEEK_WINNERS_KEY(postId, currentWeek - 1)) : null;
-      if (winnersStr) {
-        try {
-          const w = JSON.parse(winnersStr);
-          if (w.theme?.title) themeTitle = w.theme.title;
-          if (w.theme?.proposedBy) directorName = w.theme.proposedBy;
-          if (w.palette) {
-            paletteName = w.palette.title || null;
-            if (Array.isArray(w.palette.data?.colors)) paletteColors = w.palette.data.colors;
-          }
-          if (w.brushKit) {
-            brushKitName = w.brushKit.title || null;
-            if (Array.isArray(w.brushKit.data?.names)) brushNames = w.brushKit.data.names;
-            else if (Array.isArray(w.brushKit.data?.brushes)) brushNames = w.brushKit.data.brushes.map((b: any) => typeof b === 'string' ? b : b.name || '');
-          }
-        } catch {}
+      let w: any = postId ? await materializePreviousWeekWinners(postId, currentWeek) : null;
+      if (!w) w = houseWinnersForWeek(currentWeek - 1);
+      if (w.theme?.title) themeTitle = w.theme.title;
+      if (w.theme?.proposedBy) directorName = w.theme.proposedBy;
+      if (w.palette) {
+        paletteName = w.palette.title || null;
+        if (Array.isArray(w.palette.data?.colors)) paletteColors = w.palette.data.colors;
+      }
+      if (w.brushKit) {
+        brushKitName = w.brushKit.title || null;
+        if (Array.isArray(w.brushKit.data?.names)) brushNames = w.brushKit.data.names;
+        else if (Array.isArray(w.brushKit.data?.brushes)) brushNames = w.brushKit.data.brushes.map((b: any) => typeof b === 'string' ? b : b.name || '');
       }
     }
 
@@ -313,11 +364,13 @@ async function ensureWeeklyShowcasePost(callerPostId?: string): Promise<string |
       const alreadyScheduled = await redis.get(animKey);
       if (!alreadyScheduled) {
         try {
-          const sixHours = 6 * 60 * 60 * 1000;
+          // Publish the previous week's animation GIF shortly after the new week starts
+          // (a couple of minutes, not hours) so it lands right at week end.
+          const animDelayMs = 2 * 60 * 1000; // 2 minutes
           await scheduler.runJob({
             name: 'weekly-animation',
             data: { postId: callerPostId || context.postId, week: currentWeek - 1 },
-            runAt: new Date(Date.now() + sixHours),
+            runAt: new Date(Date.now() + animDelayMs),
           });
           await redis.set(animKey, 'scheduled');
           console.log('[showcase] scheduled weekly-animation for week', currentWeek - 1);
@@ -454,19 +507,29 @@ router.get('/api/showcase-data', async (_req: any, res: any) => {
     }
     
     if (!metaRaw) {
-      // Return defaults for Week 1 if metadata hasn't been stored yet
+      // Build a never-empty bundle when week metadata hasn't been stored yet.
       const now = await nowMs();
       const anchorStr = await redis.get(WEEK_ANCHOR_KEY);
       const anchorMs = anchorStr ? parseInt(anchorStr, 10) : now;
       const weekBounds = getWeekBoundariesFromAnchor(anchorMs, week);
+      let theme = '', paletteName = '', paletteColors: string[] = [], brushKitName = '', brushNames: string[] = [], directorName = '';
+      if (week === 1) {
+        const hb = getHouseBundle(1);
+        theme = hb.theme.name; paletteName = hb.palette.name; paletteColors = hb.palette.colors;
+        brushKitName = hb.brushKit.name; brushNames = hb.brushKit.names; directorName = hb.director;
+      } else {
+        const { postId } = context;
+        let w: any = postId ? await materializePreviousWeekWinners(postId, week) : null;
+        if (!w) w = houseWinnersForWeek(week - 1);
+        theme = w.theme?.title || w.theme?.data?.value || '';
+        directorName = w.theme?.proposedBy || '';
+        paletteName = w.palette?.title || '';
+        paletteColors = Array.isArray(w.palette?.data?.colors) ? w.palette.data.colors : [];
+        brushKitName = w.brushKit?.title || '';
+        brushNames = Array.isArray(w.brushKit?.data?.names) ? w.brushKit.data.names : [];
+      }
       res.json({
-        week,
-        theme: week === 1 ? 'Moving Lines' : '',
-        paletteName: week === 1 ? 'Sunrise' : '',
-        paletteColors: week === 1 ? ['#FF6B6B', '#4ECDC4', '#45B7D1', '#96CEB4', '#FFEAA7', '#DDA0DD'] : [],
-        brushKitName: week === 1 ? 'Classic' : '',
-        brushNames: week === 1 ? ['Ink', 'Acrylic Paint', 'Watercolor Wash', 'Airbrush'] : [],
-        directorName: week === 1 ? 'kinora-app' : '',
+        week, theme, paletteName, paletteColors, brushKitName, brushNames, directorName,
         startDate: formatDateHuman(weekBounds.startMs),
         endDate: formatDateHuman(weekBounds.endMs),
       });
@@ -1396,6 +1459,8 @@ router.get('/api/proposals', async (req, res) => {
     const weekParam = req.query.week ? parseInt(String(req.query.week)) : undefined;
     const currentWeek = await ensureCurrentWeek();
     const targetWeek = weekParam || currentWeek;
+    // Seed the house bundle into the current week's ballot if nobody proposed a theme.
+    await ensureWeekSeeded(postId, currentWeek);
     const proposalsStr = await redis.get(WEEK_PROPOSALS_KEY(postId, targetWeek));
     const proposals = proposalsStr ? JSON.parse(proposalsStr) : [];
     res.json({ proposals, week: targetWeek });
@@ -1655,6 +1720,9 @@ router.post('/api/proposals', async (req, res) => {
     if (!type || !title) return res.status(400).json({ error: 'type and title required' });
     const username = await reddit.getCurrentUsername();
     const week = await ensureCurrentWeek();
+    // Ensure the house floor exists before writing the human proposal, so the two
+    // coexist (and to shrink the seed-vs-proposal lost-update window).
+    await ensureWeekSeeded(postId, week);
   const ts = await nowMs();
   const proposal = { id: ts.toString(), type, title, data, proposedBy: username || 'anonymous', proposedAt: ts, votes: 0, voters: [], week };
     const proposalsStr = await redis.get(WEEK_PROPOSALS_KEY(postId, week));
@@ -1678,6 +1746,11 @@ router.post('/api/proposals/:id/vote', async (req,res)=>{
     const proposalsStr = await redis.get(WEEK_PROPOSALS_KEY(postId, week));
     const proposals = proposalsStr ? JSON.parse(proposalsStr) : [];
     const proposal = proposals.find((p:any)=>p.id===proposalId); if(!proposal) return res.status(404).json({ error:'proposal not found' });
+    // The house default is a fixed floor (1 vote) that must lose ties to humans; do not
+    // let real votes stack on it, or it would win genuine ties. Endorse by doing nothing.
+    if (proposal.house === true || (typeof proposal.id === 'string' && proposal.id.startsWith('house_'))) {
+      return res.status(403).json({ error: 'house-default', message: 'The weekly default cannot be voted — propose or vote another bundle to override it.', votes: proposal.votes });
+    }
     const hasVoted = proposal.voters.includes(username);
     if(hasVoted){ proposal.voters = proposal.voters.filter((v:string)=>v!==username); proposal.votes = Math.max(0, proposal.votes-1); }
     else { proposal.voters.push(username); proposal.votes += 1; }
@@ -1785,6 +1858,65 @@ router.post('/api/admin/reset-week', async (_req, res) => {
     res.status(500).json({ error: e?.message });
   }
 });
+// --- Admin: fresh reset to week 1 WITH the first house preset pre-seeded ---
+// Like reset-week, but also clears proposals/winners/seed-flags and seeds Week 1's
+// ballot with the house bundle (theme "Moving Lines" + a fresh palette + brushes),
+// so voting/config are populated from the very first load. Call from a post context.
+// Optional: ?frames=1 also wipes this post's frames.
+router.post('/api/admin/reset-fresh', async (req, res) => {
+  try {
+    const { subredditName, postId } = context;
+    const now = Date.now();
+    const anchor = startOfMondayWeekET(now);
+    await redis.set(WEEK_ANCHOR_KEY, anchor.toString());
+    await redis.set(CURRENT_WEEK_KEY, '1');
+    await redis.set(WEEK_TIME_OFFSET_KEY, '0');
+
+    // Clear proposals / winners / seed flags for the first weeks (defensive).
+    if (postId) {
+      for (let w = 1; w <= 8; w++) {
+        await redis.set(WEEK_PROPOSALS_KEY(postId, w), JSON.stringify([]));
+        await redis.set(WEEK_WINNERS_KEY(postId, w), '');
+        await redis.set(WEEK_SEEDED_KEY(postId, w), '');
+      }
+    }
+
+    // Purge Week 1 showcase metadata + dedupe so the announcement regenerates.
+    await redis.set(SHOWCASE_WEEK_META_KEY(1), '');
+    if (subredditName) {
+      const dedupeHash = `weekly_showcase_posts:${subredditName}`;
+      try { await redis.hDel(dedupeHash, ['1']); } catch {}
+    }
+    await redis.set(SHOWCASE_WEEKLY_KEY('', 1), '');
+
+    // Optional: wipe this post's frames.
+    let framesDeleted = 0;
+    if (postId && req.query.frames === '1') {
+      const listKey = `frames:list:${postId}`;
+      const raw = await redis.get(listKey);
+      const keys: string[] = raw ? JSON.parse(raw) : [];
+      for (const key of keys) { try { await redis.set(`frames:data:${postId}:${key}`, ''); framesDeleted++; } catch {} }
+      await redis.set(listKey, JSON.stringify([]));
+    }
+
+    // Seed Week 1 ballot with the first house preset.
+    let seeded: any = null;
+    if (postId) {
+      const bounds = await getAccurateWeekBoundaries(1);
+      const proposedAt = bounds.startMs || anchor;
+      const house = buildHouseProposals(1, proposedAt);
+      await redis.set(WEEK_PROPOSALS_KEY(postId, 1), JSON.stringify(house));
+      await redis.set(WEEK_SEEDED_KEY(postId, 1), '1');
+      seeded = getHouseBundle(1);
+    }
+
+    console.log('[admin:reset-fresh] reset to week 1, anchor:', anchor, 'director:', HOUSE_DIRECTOR, 'seeded:', !!seeded);
+    res.json({ ok: true, anchor, week: 1, postId: postId || null, framesDeleted, seeded });
+  } catch (e: any) {
+    console.error('[admin:reset-fresh] error', e?.message);
+    res.status(500).json({ error: e?.message });
+  }
+});
 // --- Admin: clear all frames ---
 // Accepts optional query ?postId=t3_xxx to target a specific post, otherwise uses context.postId
 router.post('/api/admin/clear-frames', async (req, res) => {
@@ -1806,6 +1938,59 @@ router.post('/api/admin/clear-frames', async (req, res) => {
     res.json({ ok: true, deleted, postId: targetPostId });
   } catch (e: any) {
     console.error('[admin:clear-frames] error', e?.message);
+    res.status(500).json({ error: e?.message });
+  }
+});
+// --- Admin: clear frames for a specific week ---
+// Usage: POST /api/admin/clear-week?week=2
+router.post('/api/admin/clear-week', async (req, res) => {
+  try {
+    const targetWeek = parseInt(req.query.week as string, 10);
+    if (!targetWeek || isNaN(targetWeek)) return res.status(400).json({ error: 'pass ?week=N' });
+    const { postId, subredditName } = context;
+    if (!postId) return res.status(400).json({ error: 'no postId' });
+
+    // 1. Remove frames tagged as this week from the frames list
+    const listKey = `frames:list:${postId}`;
+    const raw = await redis.get(listKey);
+    const allKeys: string[] = raw ? JSON.parse(raw) : [];
+    const kept: string[] = [];
+    let deleted = 0;
+    for (const key of allKeys) {
+      const frameRaw = await redis.get(`frames:data:${postId}:${key}`);
+      if (!frameRaw) { kept.push(key); continue; }
+      try {
+        const frame = JSON.parse(frameRaw);
+        if (frame.week === targetWeek) {
+          await redis.set(`frames:data:${postId}:${key}`, '');
+          deleted++;
+        } else {
+          kept.push(key);
+        }
+      } catch { kept.push(key); }
+    }
+    await redis.set(listKey, JSON.stringify(kept));
+
+    // 2. Clear showcase dedupe hash for this week
+    if (subredditName) {
+      const dedupeHash = `weekly_showcase_posts:${subredditName}`;
+      try { await redis.hDel(dedupeHash, [String(targetWeek)]); } catch {}
+    }
+    // Clear legacy showcase key
+    await redis.set(SHOWCASE_WEEKLY_KEY('', targetWeek), '');
+    // Clear week metadata
+    await redis.set(SHOWCASE_WEEK_META_KEY(targetWeek), '');
+
+    // 3. Reset current week back if we deleted the current week
+    const currentWeek = await ensureCurrentWeek();
+    if (targetWeek >= currentWeek) {
+      await redis.set(CURRENT_WEEK_KEY, String(targetWeek - 1 > 0 ? targetWeek - 1 : 1));
+    }
+
+    console.log('[admin] cleared week', targetWeek, ':', deleted, 'frames deleted,', kept.length, 'kept');
+    res.json({ ok: true, week: targetWeek, framesDeleted: deleted, framesKept: kept.length });
+  } catch (e: any) {
+    console.error('[admin:clear-week] error', e?.message);
     res.status(500).json({ error: e?.message });
   }
 });
@@ -1863,25 +2048,18 @@ router.get('/api/week', async (_req,res)=>{
   try {
     const { postId } = context;
     const currentWeek = await ensureCurrentWeek();
+    if (postId) await ensureWeekSeeded(postId, currentWeek);
     const bounds = await getAccurateWeekBoundaries(currentWeek);
   const now = await nowMs();
     const secondsUntilEnd = Math.max(0, Math.floor((bounds.endMs - now)/1000));
     let winners: any = null;
     let autoMaterialized = false;
     if (postId) {
-      const wStr = await redis.get(WEEK_WINNERS_KEY(postId, currentWeek - 1));
-      if (wStr) { try { winners = JSON.parse(wStr); } catch {} }
-      if (!winners && currentWeek > 1) {
-        // Lazy compute winners if still not stored (mirrors logic in week-config)
-        const proposalsStr = await redis.get(WEEK_PROPOSALS_KEY(postId, currentWeek - 1));
-        const proposals = proposalsStr ? JSON.parse(proposalsStr) : [];
-        const paletteWinner = pickWinner(proposals.filter((p:any)=>p.type==='palette')) || null;
-        const themeWinner = pickWinner(proposals.filter((p:any)=>p.type==='theme')) || null;
-        const brushWinner = pickWinner(proposals.filter((p:any)=>p.type==='brushKit')) || null;
-        winners = { palette: paletteWinner, theme: themeWinner, brushKit: brushWinner };
-        await redis.set(WEEK_WINNERS_KEY(postId, currentWeek - 1), JSON.stringify(winners));
-        autoMaterialized = true;
-      }
+      // Route through the shared resolver so /api/week gets the same never-empty house
+      // net + synonym-type normalization as every other read site (no all-null persist).
+      const existed = await redis.get(WEEK_WINNERS_KEY(postId, currentWeek - 1));
+      winners = await materializePreviousWeekWinners(postId, currentWeek);
+      autoMaterialized = !existed && !!winners;
     }
     res.json({ week: currentWeek, startMs: bounds.startMs, endMs: bounds.endMs, secondsUntilEnd, previousWinners: winners, previousWinnersAutoMaterialized: autoMaterialized });
   } catch(e:any){
@@ -2084,27 +2262,42 @@ server.on('error', (err) => console.error(`server error; ${err.stack}`));
 server.listen(port);
 
 // Week simulation endpoint (POST). Body: { action: 'add-days'|'add-weeks'|'set-offset'|'reset', value?: number }
-// Helper to lazily compute previous week winners if missing
+// Helper to lazily compute previous week winners if missing.
+// Guarantees a non-empty result per category by filling any gaps with the
+// deterministic house preset for that week (never-empty safety net).
 async function materializePreviousWeekWinners(postId: string, currentWeek: number) {
   if (currentWeek <= 1) return null;
-  const existing = await redis.get(WEEK_WINNERS_KEY(postId, currentWeek - 1));
-  if (existing) { try { return JSON.parse(existing); } catch { return null; } }
-  const proposalsStr = await redis.get(WEEK_PROPOSALS_KEY(postId, currentWeek - 1));
-  const proposals = proposalsStr ? JSON.parse(proposalsStr) : [];
-  const norm = proposals.map((p:any)=> ({ ...p, _normType: normalizeProposalType(p.type) }));
-  const paletteWinner = pickWinner(norm.filter((p:any)=>p._normType==='palette')) || null;
-  const themeWinner = pickWinner(norm.filter((p:any)=>p._normType==='theme')) || null;
-  const brushWinner = pickWinner(norm.filter((p:any)=>p._normType==='brushKit')) || null;
-  let winners = { palette: paletteWinner, theme: themeWinner, brushKit: brushWinner };
-  // Carry-over fallback if all null
-  if (!winners.palette && !winners.theme && !winners.brushKit) {
-    for (let w = currentWeek - 2; w >= 1; w--) {
-      const prev = await redis.get(WEEK_WINNERS_KEY(postId, w));
-      if (prev) { try { const parsed = JSON.parse(prev); if (parsed && (parsed.palette||parsed.theme||parsed.brushKit)) { winners = parsed; break; } } catch {}
+  const targetWeek = currentWeek - 1;
+  let winners: any = null;
+  const existing = await redis.get(WEEK_WINNERS_KEY(postId, targetWeek));
+  if (existing) {
+    try { winners = JSON.parse(existing); } catch { winners = null; }
+  }
+  if (!winners) {
+    const proposalsStr = await redis.get(WEEK_PROPOSALS_KEY(postId, targetWeek));
+    const proposals = proposalsStr ? JSON.parse(proposalsStr) : [];
+    const norm = proposals.map((p:any)=> ({ ...p, _normType: normalizeProposalType(p.type) }));
+    const paletteWinner = pickWinner(norm.filter((p:any)=>p._normType==='palette')) || null;
+    const themeWinner = pickWinner(norm.filter((p:any)=>p._normType==='theme')) || null;
+    const brushWinner = pickWinner(norm.filter((p:any)=>p._normType==='brushKit')) || null;
+    winners = { palette: paletteWinner, theme: themeWinner, brushKit: brushWinner };
+    // Carry-over fallback if all null: reuse the most recent week that had winners.
+    if (!winners.palette && !winners.theme && !winners.brushKit) {
+      for (let w = targetWeek - 1; w >= 1; w--) {
+        const prev = await redis.get(WEEK_WINNERS_KEY(postId, w));
+        if (prev) { try { const parsed = JSON.parse(prev); if (parsed && (parsed.palette||parsed.theme||parsed.brushKit)) { winners = parsed; break; } } catch {}
+        }
       }
     }
   }
-  await redis.set(WEEK_WINNERS_KEY(postId, currentWeek - 1), JSON.stringify(winners));
+  // Never-empty safety net: fill any missing category with the house preset.
+  const house = houseWinnersForWeek(targetWeek);
+  winners = {
+    palette: winners?.palette || house.palette,
+    theme: winners?.theme || house.theme,
+    brushKit: winners?.brushKit || house.brushKit,
+  };
+  await redis.set(WEEK_WINNERS_KEY(postId, targetWeek), JSON.stringify(winners));
   // ensure current week proposals array exists
   const curKey = WEEK_PROPOSALS_KEY(postId, currentWeek);
   if (!(await redis.get(curKey))) await redis.set(curKey, JSON.stringify([]));
@@ -2115,6 +2308,7 @@ async function materializePreviousWeekWinners(postId: string, currentWeek: numbe
 app.get('/api/week-config', async (_req, res) => {
   try {
     const { postId } = context; const currentWeek = await ensureCurrentWeek();
+    if (postId) await ensureWeekSeeded(postId, currentWeek);
     const bounds = await getAccurateWeekBoundaries(currentWeek);
     let winners: any = null;
     if (postId) {
@@ -2192,27 +2386,23 @@ app.get('/api/draw-config', async (req, res) => {
     const { postId } = context; if(!postId) return res.json({ ok:false, reason:'no postId'});
     const rawFlag = req.query.raw === '1';
     const currentWeek = await ensureCurrentWeek();
-    // Week 1 seed defaults — no previous voting exists
+    await ensureWeekSeeded(postId, currentWeek);
+    // Week 1 draw config comes from the house bundle (no previous voting exists):
+    // keeps the signature "Moving Lines" theme with a generated palette + brushes.
     if (currentWeek === 1) {
-      const seedPalette = ['#FF6B6B', '#4ECDC4', '#45B7D1', '#96CEB4', '#FFEAA7', '#DDA0DD'];
-      const seedBrushes = [
-        { id: 'ink', name: 'Ink' },
-        { id: 'acrilico', name: 'Acrylic Paint' },
-        { id: 'acuarela', name: 'Watercolor Wash' },
-        { id: 'marker', name: 'Airbrush' },
-      ];
-      const seedTheme = 'Moving Lines';
+      const hb = getHouseBundle(1);
+      const seedBrushes = hb.brushKit.ids.map((id, i) => ({ id, name: hb.brushKit.names[i] }));
       const response: any = {
         ok: true, currentWeek, previousWeek: 0,
-        paletteColors: seedPalette,
+        paletteColors: hb.palette.colors,
         brushes: seedBrushes,
-        theme: seedTheme,
-        director: 'kinora-app',
-        toolsVersion: 'seed',
+        theme: hb.theme.name,
+        director: hb.director,
+        toolsVersion: 'house-w1',
         tools: {
-          palette: { colors: seedPalette, id: 'seed' },
-          brushKit: { brushes: seedBrushes, id: 'seed' },
-          theme: { value: seedTheme, id: 'seed' },
+          palette: { colors: hb.palette.colors, id: 'house-w1-pal' },
+          brushKit: { brushes: seedBrushes, id: 'house-w1-brk' },
+          theme: { value: hb.theme.name, id: 'house-w1-thm' },
         },
       };
       return res.json(response);
@@ -2459,7 +2649,10 @@ async function fetchFramePixels(postId: string, frameKey: string): Promise<{ wid
   return null;
 }
 
-// --- Weekly Showcase Post cron (fires every Sunday 00:05 UTC) ---
+// --- Weekly Showcase Post cron (cron "5 0 * * 1" => Monday 00:05 UTC = Sunday 7:05 PM Colombia) ---
+// The week COUNTER rolls over at Monday 00:00 UTC (= Sunday 7:00 PM Colombia), so this cron fires
+// 5 minutes AFTER the reset, when ensureCurrentWeek() already reports the new week. Ballot seeding is
+// done lazily on request (ensureWeekSeeded), tied to the same Monday 00:00 UTC boundary.
 app.post('/internal/cron/weekly-showcase-post', async (_req, res) => {
   try {
     console.log('[cron:weekly-showcase] triggered');
@@ -2545,25 +2738,40 @@ app.post('/internal/scheduler/weekly-animation', async (req, res) => {
     // Encode animated GIF at 12 FPS (83ms per frame)
     const DELAY_MS = 83; // 1000 / 12 ≈ 83ms
     const encoder = GIFEncoder();
-    const targetW = pixelFrames[0]!.width;
-    const targetH = pixelFrames[0]!.height;
+    // Canonical output size — matches the client's fixed 720x1280 PORTRAIT export.
+    // Frames from any device (or older mixed-resolution frames) are resized to this
+    // so the animation includes EVERY frame instead of dropping mismatched ones.
+    const targetW = 720;
+    const targetH = 1280;
 
-    for (const frame of pixelFrames) {
-      // Ensure all frames are same dimensions (use first frame's dims)
-      let rgba = frame.data;
-      if (frame.width !== targetW || frame.height !== targetH) {
-        // Skip mismatched frames rather than resize (keeps it simple)
-        console.warn('[animation] skipping mismatched frame', frame.width, 'x', frame.height);
-        continue;
+    // Nearest-neighbor RGBA resize (no canvas API on the Devvit server runtime).
+    const resizeRGBA = (src: Uint8Array, sw: number, sh: number, dw: number, dh: number): Uint8Array => {
+      if (sw === dw && sh === dh) return src;
+      const out = new Uint8Array(dw * dh * 4);
+      for (let y = 0; y < dh; y++) {
+        const sy = Math.min(sh - 1, Math.floor((y * sh) / dh));
+        for (let x = 0; x < dw; x++) {
+          const sx = Math.min(sw - 1, Math.floor((x * sw) / dw));
+          const si = (sy * sw + sx) * 4;
+          const di = (y * dw + x) * 4;
+          out[di] = src[si]!; out[di + 1] = src[si + 1]!; out[di + 2] = src[si + 2]!; out[di + 3] = src[si + 3]!;
+        }
       }
+      return out;
+    };
+
+    let encoded = 0;
+    for (const frame of pixelFrames) {
+      const rgba = (frame.width !== targetW || frame.height !== targetH)
+        ? resizeRGBA(frame.data, frame.width, frame.height, targetW, targetH)
+        : frame.data;
       const palette = quantize(rgba, 256);
       const index = applyPalette(rgba, palette);
-      encoder.writeFrame(index, targetW, targetH, {
-        palette,
-        delay: DELAY_MS,
-      });
+      encoder.writeFrame(index, targetW, targetH, { palette, delay: DELAY_MS });
+      encoded++;
     }
     encoder.finish();
+    console.log('[animation] encoded', encoded, 'of', pixelFrames.length, 'frames at', targetW, 'x', targetH);
 
     const gifBytes = encoder.bytes();
     console.log('[animation] GIF encoded:', gifBytes.length, 'bytes');

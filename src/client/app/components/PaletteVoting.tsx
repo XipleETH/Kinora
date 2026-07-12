@@ -224,14 +224,18 @@ export const PaletteVoting: React.FC<PaletteVotingProps> = () => {
             <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-8">
               {combinedSets.map(setObj=>{
                 const totalVotes = setObj.theme.votes; // using theme vote as representative
+                const isHouse = setObj.theme.data?.house === true || setObj.theme.proposedBy === 'kinora-app';
                 const alreadyAll = hasUserVoted(setObj.theme) && hasUserVoted(setObj.palette) && hasUserVoted(setObj.brushes);
                 const paletteColors: string[] = (Array.isArray(setObj.palette.data)? setObj.palette.data : setObj.palette.data?.colors) || [];
                 const brushNames: string[] = (setObj.brushes.data?.names || []);
                 return (
-                  <div key={setObj.groupId} className="sketch-border rounded-2xl p-5 bg-white shadow-[4px_4px_0_0_#000] flex flex-col gap-4">
+                  <div key={setObj.groupId} className={`sketch-border rounded-2xl p-5 shadow-[4px_4px_0_0_#000] flex flex-col gap-4 ${isHouse? 'bg-[#FFF9EE]':'bg-white'}`}>
                     <div className="flex items-start justify-between gap-2">
                       <div>
-                        <h4 className="text-lg font-bold text-black mb-1">{setObj.theme.title}</h4>
+                        <div className="flex items-center gap-2 mb-1">
+                          <h4 className="text-lg font-bold text-black">{setObj.theme.title}</h4>
+                          {isHouse && <span className="px-2 py-0.5 rounded-full bg-yellow-200 sketch-border text-[10px] font-bold text-black uppercase tracking-wide">Default</span>}
+                        </div>
                         <div className="text-[11px] font-semibold text-black/70 mb-1">Director: <span className="text-black">u/{setObj.theme.proposedBy}</span></div>
                         <div className="flex items-center gap-2 flex-wrap mb-2">
                           {paletteColors.slice(0,6).map((c,i)=>(<span key={i} className="w-5 h-5 rounded-sm sketch-border-inner" style={{background:c}} />))}
@@ -242,9 +246,15 @@ export const PaletteVoting: React.FC<PaletteVotingProps> = () => {
                       </div>
                       <div className="flex items-center gap-2 font-bold text-black"><span className="text-sm">Votes:</span><span className="text-xl">{totalVotes}</span></div>
                     </div>
-                    <button onClick={()=>voteCombined(setObj)} disabled={!currentUser || alreadyAll} className={`sketch-border w-full flex items-center justify-center gap-2 py-3 px-4 rounded-lg font-bold transition-all ${alreadyAll? 'bg-emerald-300 cursor-default':'bg-yellow-200 hover:bg-yellow-300'} ${!currentUser? 'opacity-50 cursor-not-allowed':''}`}>
-                      <span>{alreadyAll? 'Voted!' : 'Vote bundle (x3)'}</span>
-                    </button>
+                    {isHouse ? (
+                      <div className="sketch-border w-full text-center py-3 px-4 rounded-lg font-semibold bg-[#FAF3E0] text-black/70 text-sm">
+                        Weekly default — wins if no bundle gets more votes. Propose your own to override.
+                      </div>
+                    ) : (
+                      <button onClick={()=>voteCombined(setObj)} disabled={!currentUser || alreadyAll} className={`sketch-border w-full flex items-center justify-center gap-2 py-3 px-4 rounded-lg font-bold transition-all ${alreadyAll? 'bg-emerald-300 cursor-default':'bg-yellow-200 hover:bg-yellow-300'} ${!currentUser? 'opacity-50 cursor-not-allowed':''}`}>
+                        <span>{alreadyAll? 'Voted!' : 'Vote bundle (x3)'}</span>
+                      </button>
+                    )}
                   </div>
                 );
               })}

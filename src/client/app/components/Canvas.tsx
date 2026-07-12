@@ -24,15 +24,34 @@ interface CanvasProps {
   onDirty?: () => void;
   // Optional image (dataURL) to restore onto a freshly mounted/cleared canvas
   restoreImage?: string | null;
+  // Called when a two-finger pinch changes zoom (controlled zoom lives in the parent)
+  onZoomChange?: (zoom: number) => void;
+  // Desktop only: cap the displayed canvas height (px) so it ends level with the side
+  // tool panels. The 9:16 aspect is preserved (width follows).
+  maxHeight?: number;
 }
 
-// Default fallback size (desktop)
-const DEFAULT_WIDTH = 480;
+// Default canvas size — 9:16 PORTRAIT (vertical, Reels/TikTok format)
+const DEFAULT_WIDTH = 360;
 const DEFAULT_HEIGHT = 640;
+// Canvas aspect ratio (width / height). Portrait 9:16 so every stored frame keeps
+// the same vertical shape and fills a phone screen.
+const CANVAS_ASPECT = DEFAULT_WIDTH / DEFAULT_HEIGHT;
+
+// --- FIXED CANONICAL RESOLUTION (device-independent) ---------------------------
+// The drawing happens in a fixed LOGICAL coordinate space (360x640) where brush
+// sizes live, so brush feel is identical on every device. The backing store is
+// supersampled to LOGICAL*SUPERSAMPLE = 720x1280 (vertical), so EVERY exported
+// frame is exactly 720x1280 regardless of screen size or devicePixelRatio. This
+// keeps the weekly video coherent (the GIF encoder no longer drops mismatched
+// frames) and makes onion-skin / restore geometry distortion-free across devices.
+const LOGICAL_W = DEFAULT_WIDTH;   // 360
+const LOGICAL_H = DEFAULT_HEIGHT;  // 640
+const SUPERSAMPLE = 2;             // backing store = 720x1280
 
 export const Canvas = forwardRef<HTMLCanvasElement, CanvasProps>(({
   activeColor, brushSize, brushSpacing, brushOpacity, isDrawing, setIsDrawing, disabled,
-  brushPreset, tool = 'draw', onBeforeMutate, zoom: controlledZoom, onionImage, onionOpacity = 0.4, onDirty, restoreImage
+  brushPreset, tool = 'draw', onBeforeMutate, zoom: controlledZoom, onionImage, onionOpacity = 0.4, onDirty, restoreImage, onZoomChange, maxHeight
 }, ref) => {
   const internalRef = useRef<HTMLCanvasElement>(null);
   const canvasRef = (ref as React.RefObject<HTMLCanvasElement>) || internalRef;
@@ -48,57 +67,79 @@ export const Canvas = forwardRef<HTMLCanvasElement, CanvasProps>(({
   // Internal zoom state only used when no controlled zoom is supplied
   const [internalZoom] = useState(1);
   const zoom = controlledZoom ?? internalZoom;
-  const penActionRef = useRef<'draw' | 'erase' | 'pan' | null>(null);
+  const penActionRef = useRef<'draw' | 'erase' | 'pan' | 'pinch' | null>(null);
   const eraseRef = useRef(false);
   const activeDrawPointerIdRef = useRef<number | null>(null);
   const activePanPointerIdRef = useRef<number | null>(null);
+  // Touch gesture state: 1 finger draws, 2 fingers pinch-zoom + pan.
+  const touchPtsRef = useRef<Map<number, { x: number; y: number }>>(new Map());
+  const pinchRef = useRef<{ dist: number; cx: number; cy: number; zoom: number; scrollLeft: number; scrollTop: number } | null>(null);
+  const pendingTouchRef = useRef<{ id: number; startX: number; startY: number; offX: number; offY: number } | null>(null);
 
-    // Responsive size (full viewport on mobile)
+    // Responsive size: fit the largest 16:9 canvas into the available layout box so
+    // it fills the screen (width from the parent cell, height from the viewport).
     const [displaySize, setDisplaySize] = useState<{w:number;h:number}>({ w: DEFAULT_WIDTH, h: DEFAULT_HEIGHT });
-    const isMobile = () => window.innerWidth < 768;
     useEffect(() => {
-      const update = () => {
-        if (isMobile()) {
-          // Use full visual viewport height if available (accounts for mobile URL bar)
-          const vv = (window as any).visualViewport;
-          const height = vv ? vv.height : window.innerHeight;
-          setDisplaySize({ w: window.innerWidth, h: height });
+      const compute = () => {
+        const vv = (window as any).visualViewport;
+        const viewW = window.innerWidth;
+        const viewH = vv ? vv.height : window.innerHeight;
+        let availW: number;
+        let availH: number;
+        if (viewW < 768) {
+          // Mobile: the canvas is the focus — fit the largest 16:9 into (almost) the
+          // full width, leaving room for the top badge row and bottom nav bar.
+          availW = viewW - 8;
+          availH = Math.max(160, viewH - 96);
         } else {
-          setDisplaySize({ w: DEFAULT_WIDTH, h: DEFAULT_HEIGHT });
+          // Desktop: the portrait canvas is sized by available HEIGHT (width follows),
+          // so it no longer depends on the flex cell width. This lets the tool panels
+          // hug the canvas instead of being pushed to the screen edges.
+          const fit = containerRef.current?.parentElement;
+          const rect = fit?.getBoundingClientRect();
+          const top = rect ? rect.top : 0;
+          availH = Math.max(160, viewH - top - 12); // leave a little breathing room
+          availW = Math.max(160, viewW - 140);      // generous; height is the real constraint for portrait
+          // Cap to the side panels' height so the canvas ends level with them.
+          if (maxHeight && maxHeight > 160) availH = Math.min(availH, maxHeight);
         }
+        // Largest 16:9 that fits both dimensions
+        let w = availW;
+        let h = w / CANVAS_ASPECT;
+        if (h > availH) { h = availH; w = h * CANVAS_ASPECT; }
+        w = Math.floor(w); h = Math.floor(h);
+        setDisplaySize(prev => (prev.w === w && prev.h === h) ? prev : { w, h });
       };
-      update();
-      window.addEventListener('resize', update);
-      if ((window as any).visualViewport) {
-        (window as any).visualViewport.addEventListener('resize', update);
-      }
+      compute();
+      const shell = containerRef.current;
+      const ro = (typeof ResizeObserver !== 'undefined') ? new ResizeObserver(() => compute()) : null;
+      if (ro && shell?.parentElement) ro.observe(shell.parentElement);
+      window.addEventListener('resize', compute);
+      if ((window as any).visualViewport) (window as any).visualViewport.addEventListener('resize', compute);
       return () => {
-        window.removeEventListener('resize', update);
-        if ((window as any).visualViewport) {
-          (window as any).visualViewport.removeEventListener('resize', update);
-        }
+        if (ro) ro.disconnect();
+        window.removeEventListener('resize', compute);
+        if ((window as any).visualViewport) (window as any).visualViewport.removeEventListener('resize', compute);
       };
-    }, []);
+    }, [maxHeight]);
 
-    // Initialize & resize canvas backing store when displaySize changes (only once content empty)
+    // Initialize the FIXED backing store once on mount (decoupled from the display
+    // size, so resizing the window no longer clears the drawing). The element is
+    // remounted per turn/frame via its `key`, so this re-runs with fresh content then.
     useEffect(() => {
       const canvas = canvasRef.current;
       if (!canvas) return;
-      const dpr = Math.min(3, window.devicePixelRatio || 1); // cap dpr for memory
-      const logicalW = displaySize.w;
-      const logicalH = displaySize.h;
-      // Resize backing store; this clears content
-      canvas.width = Math.round(logicalW * dpr);
-      canvas.height = Math.round(logicalH * dpr);
+      canvas.width = LOGICAL_W * SUPERSAMPLE;   // 720
+      canvas.height = LOGICAL_H * SUPERSAMPLE;  // 1280
       const ctx = canvas.getContext('2d');
       if (!ctx) return;
       ctx.setTransform(1,0,0,1,0,0);
-      ctx.scale(dpr, dpr);
+      ctx.scale(SUPERSAMPLE, SUPERSAMPLE);      // draw in LOGICAL (640x360) space
       ctx.fillStyle = '#ffffff';
-      ctx.fillRect(0, 0, logicalW, logicalH);
+      ctx.fillRect(0, 0, LOGICAL_W, LOGICAL_H);
       ctx.lineCap = 'round';
       ctx.lineJoin = 'round';
-    }, [displaySize.w, displaySize.h]);
+    }, []);
 
   // mouse pos helper removed (pointer events compute directly)
 
@@ -242,7 +283,7 @@ export const Canvas = forwardRef<HTMLCanvasElement, CanvasProps>(({
           let blendR = 0, blendG = 0, blendB = 0;
           if (wetness > 0 && s % 2 === 0) {
             try {
-              const img = ctx.getImageData(Math.round(cx - 1), Math.round(cy - 1), 2, 2);
+              const img = ctx.getImageData(Math.round((cx - 1) * SUPERSAMPLE), Math.round((cy - 1) * SUPERSAMPLE), 2 * SUPERSAMPLE, 2 * SUPERSAMPLE);
               const d = img.data; let c = 0;
               for (let i = 0; i < d.length; i += 4) { blendR += d[i]; blendG += d[i+1]; blendB += d[i+2]; c++; }
               if (c) { blendR/=c; blendG/=c; blendB/=c; }
@@ -509,7 +550,8 @@ export const Canvas = forwardRef<HTMLCanvasElement, CanvasProps>(({
           const y = from.y + (to.y - from.y) * t;
           const sampleSize = Math.max(2, baseSize * 0.5);
           try {
-            const img = ctx.getImageData(Math.max(0, x - sampleSize / 2), Math.max(0, y - sampleSize / 2), sampleSize, sampleSize);
+            const dev = Math.max(1, Math.round(sampleSize * SUPERSAMPLE));
+            const img = ctx.getImageData(Math.max(0, Math.round((x - sampleSize / 2) * SUPERSAMPLE)), Math.max(0, Math.round((y - sampleSize / 2) * SUPERSAMPLE)), dev, dev);
             const d = img.data;
             let r = 0, g = 0, b = 0, c = 0;
             for (let p = 0; p < d.length; p += 4) { r += d[p]; g += d[p + 1]; b += d[p + 2]; c++; }
@@ -679,12 +721,11 @@ export const Canvas = forwardRef<HTMLCanvasElement, CanvasProps>(({
       if (!canvas) return;
       const ctx = canvas.getContext('2d');
       if (!ctx) return;
-      const dpr = window.devicePixelRatio || 1;
-  const w = canvas.width; // device px
-  const h = canvas.height;
-      // Logical -> device pixel coords
-      const sx = Math.floor(x * dpr);
-      const sy = Math.floor(y * dpr);
+  const w = canvas.width; // device px (fixed 720)
+  const h = canvas.height; // fixed 1280
+      // Logical (360x640) -> device pixel coords
+      const sx = Math.floor(x * SUPERSAMPLE);
+      const sy = Math.floor(y * SUPERSAMPLE);
       if (sx < 0 || sy < 0 || sx >= w || sy >= h) return;
 
       const imageData = ctx.getImageData(0, 0, w, h);
@@ -776,7 +817,7 @@ export const Canvas = forwardRef<HTMLCanvasElement, CanvasProps>(({
       const texture = brushPreset?.texture ?? 'none';
       const bboxW = maxX - minX + 1; // device px
       const bboxH = maxY - minY + 1;
-      const baseSize = Math.max(1, Math.floor(brushSize * dpr));
+      const baseSize = Math.max(1, Math.floor(brushSize * SUPERSAMPLE));
       const drawSolidFill = () => {
         for (let y0 = minY; y0 <= maxY; y0++) {
           let m = y0 * w + minX; let di = m * 4;
@@ -814,7 +855,7 @@ export const Canvas = forwardRef<HTMLCanvasElement, CanvasProps>(({
       // 1) Charcoal: scatter grains and soft halos inside mask
       const fillCharcoal = () => {
         const area = bboxW * bboxH;
-        const density = Math.max(600, Math.min(8000, Math.floor(area / 140))); // tuned for 480x640
+        const density = Math.max(600, Math.min(8000, Math.floor(area / 140))); // area-relative (scales with canvas size)
         const grains = Math.floor(density * (0.6 + 0.8 * (brushPreset?.density ?? 1)));
         const maxR = Math.max(1, Math.floor(baseSize * 0.22));
         for (let g = 0; g < grains; g++) {
@@ -950,9 +991,127 @@ export const Canvas = forwardRef<HTMLCanvasElement, CanvasProps>(({
       strokeStartPosRef.current = null;
     };
 
+    // Map a pointer offset (CSS px within the rendered canvas element) to the fixed
+    // LOGICAL drawing space (0..640 x 0..360). The element's rendered size is
+    // displaySize*zoom, so dividing by zoom then scaling by LOGICAL/displaySize
+    // yields device-independent coordinates.
+    const toLogicalPos = (offX: number, offY: number) => {
+      const sx = displaySize.w > 0 ? LOGICAL_W / displaySize.w : 1;
+      const sy = displaySize.h > 0 ? LOGICAL_H / displaySize.h : 1;
+      return { x: (offX / zoom) * sx, y: (offY / zoom) * sy };
+    };
+
+    // --- Touch gestures: 1 finger draws, 2 fingers pinch-zoom + pan --------------
+    const TOUCH_DRAW_THRESHOLD = 4; // px of movement before a touch becomes a stroke
+
+    const onTouchPointerDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
+      const c = containerRef.current!;
+      touchPtsRef.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      if (touchPtsRef.current.size >= 2) {
+        // Second finger -> pinch/pan. Cancel any single-finger stroke in progress
+        // WITHOUT depositing a tap-dot: clear the tap-dot guards before endStroke so a
+        // just-committed-but-un-inked stroke is discarded cleanly instead of leaving a dot.
+        if (penActionRef.current === 'draw' || penActionRef.current === 'erase') {
+          firstMoveRef.current = false;
+          strokeStartPosRef.current = null;
+          endStroke();
+          activeDrawPointerIdRef.current = null;
+        }
+        pendingTouchRef.current = null;
+        const vals = [...touchPtsRef.current.values()];
+        const a = vals[0]!, b = vals[1]!;
+        const dist = Math.hypot(b.x - a.x, b.y - a.y) || 1;
+        pinchRef.current = { dist, cx: (a.x + b.x) / 2, cy: (a.y + b.y) / 2, zoom, scrollLeft: c.scrollLeft, scrollTop: c.scrollTop };
+        penActionRef.current = 'pinch';
+        return;
+      }
+      if (penActionRef.current === 'pinch') return;
+      const native = e.nativeEvent as PointerEvent & { offsetX: number; offsetY: number };
+      if (tool === 'fill') {
+        const pos = toLogicalPos(native.offsetX, native.offsetY);
+        onBeforeMutate?.();
+        floodFill(pos.x, pos.y);
+        onDirty?.();
+        return;
+      }
+      // Defer drawing until the finger moves past a threshold, so a quickly-added
+      // 2nd finger becomes a pinch with no stray mark. A pure tap becomes a dot on up.
+      pendingTouchRef.current = { id: e.pointerId, startX: e.clientX, startY: e.clientY, offX: native.offsetX, offY: native.offsetY };
+    };
+
+    // Returns true if the move was fully handled (caller should return early).
+    const onTouchPointerMove = (e: React.PointerEvent<HTMLCanvasElement>): boolean => {
+      const c = containerRef.current!;
+      if (touchPtsRef.current.has(e.pointerId)) touchPtsRef.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      if (penActionRef.current === 'pinch' && pinchRef.current && touchPtsRef.current.size >= 2) {
+        const vals = [...touchPtsRef.current.values()];
+        const a = vals[0]!, b = vals[1]!;
+        const dist = Math.hypot(b.x - a.x, b.y - a.y) || 1;
+        const mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2;
+        const p = pinchRef.current;
+        onZoomChange?.(Math.max(1, Math.min(4, p.zoom * (dist / p.dist))));
+        c.scrollLeft = p.scrollLeft - (mx - p.cx);
+        c.scrollTop = p.scrollTop - (my - p.cy);
+        return true;
+      }
+      const pend = pendingTouchRef.current;
+      if (pend && pend.id === e.pointerId) {
+        const moved = Math.hypot(e.clientX - pend.startX, e.clientY - pend.startY);
+        if (moved > TOUCH_DRAW_THRESHOLD) {
+          const erase = tool === 'erase';
+          penActionRef.current = erase ? 'erase' : 'draw';
+          activeDrawPointerIdRef.current = e.pointerId;
+          beginStroke(toLogicalPos(pend.offX, pend.offY), erase);
+          pendingTouchRef.current = null;
+        }
+        return true;
+      }
+      // Active touch stroke: let the shared drawing block (below) run.
+      if ((penActionRef.current === 'draw' || penActionRef.current === 'erase') && activeDrawPointerIdRef.current === e.pointerId) {
+        return false;
+      }
+      return true;
+    };
+
+    const onTouchPointerUp = (e: React.PointerEvent<HTMLCanvasElement>) => {
+      touchPtsRef.current.delete(e.pointerId);
+      if (penActionRef.current === 'pinch') {
+        if (touchPtsRef.current.size < 2) {
+          pinchRef.current = null; penActionRef.current = null;
+        } else {
+          // Still pinching with 2+ fingers: re-baseline from the remaining pair so
+          // lifting a finger that was part of the baseline pair doesn't jump zoom/pan.
+          const c = containerRef.current!;
+          const vals = [...touchPtsRef.current.values()];
+          const a = vals[0]!, b = vals[1]!;
+          pinchRef.current = { dist: Math.hypot(b.x - a.x, b.y - a.y) || 1, cx: (a.x + b.x) / 2, cy: (a.y + b.y) / 2, zoom, scrollLeft: c.scrollLeft, scrollTop: c.scrollTop };
+        }
+        return;
+      }
+
+      const pend = pendingTouchRef.current;
+      if (pend && pend.id === e.pointerId) {
+        // Tap with no movement -> place a dot.
+        if (tool !== 'fill') {
+          const erase = tool === 'erase';
+          beginStroke(toLogicalPos(pend.offX, pend.offY), erase);
+          endStroke();
+        }
+        pendingTouchRef.current = null;
+        return;
+      }
+      if ((penActionRef.current === 'draw' || penActionRef.current === 'erase') && activeDrawPointerIdRef.current === e.pointerId) {
+        endStroke();
+        activeDrawPointerIdRef.current = null;
+        penActionRef.current = null;
+      }
+    };
+
     const handlePointerDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
       if (disabled) return;
-      
+      // Touch is handled by its own gesture state machine (1 finger draws, 2 pinch).
+      if (e.pointerType === 'touch') { onTouchPointerDown(e); return; }
+
       // Si ya estamos dibujando con otro puntero, ignorar nuevos punteros (evitar pan + draw simultáneos)
       if ((penActionRef.current === 'draw' || penActionRef.current === 'erase') && activeDrawPointerIdRef.current !== e.pointerId) {
         return;
@@ -969,7 +1128,7 @@ export const Canvas = forwardRef<HTMLCanvasElement, CanvasProps>(({
       
   const container = containerRef.current!;
   const native = e.nativeEvent as PointerEvent & { offsetX: number; offsetY: number };
-  const pos = { x: native.offsetX / zoom, y: native.offsetY / zoom };
+  const pos = toLogicalPos(native.offsetX, native.offsetY);
       const buttons = e.buttons;
 
       // Fill tool: perform on primary click with mouse/pen. Touch remains pan-only by design.
@@ -1014,13 +1173,6 @@ export const Canvas = forwardRef<HTMLCanvasElement, CanvasProps>(({
             beginStroke(pos, false);
           }
         }
-      } else if (e.pointerType === 'touch') {
-        // Si ya se está dibujando con pen/mouse, ignorar pan táctil
-        if (penActionRef.current === 'draw' || penActionRef.current === 'erase') return;
-        // Pan con un dedo (sin dibujar)
-        penActionRef.current = 'pan';
-        activePanPointerIdRef.current = e.pointerId;
-        panState.current = { x: e.clientX, y: e.clientY, scrollLeft: container.scrollLeft, scrollTop: container.scrollTop };
       }
     };
 
@@ -1033,18 +1185,15 @@ export const Canvas = forwardRef<HTMLCanvasElement, CanvasProps>(({
       const ctx = canvas.getContext('2d'); if (!ctx) return;
       const img = new Image();
       img.onload = () => {
-        const dpr = Math.min(3, window.devicePixelRatio || 1);
-        const logicalW = canvas.width / dpr;
-        const logicalH = canvas.height / dpr;
         ctx.save();
         ctx.setTransform(1,0,0,1,0,0);
-        ctx.scale(dpr, dpr);
+        ctx.scale(SUPERSAMPLE, SUPERSAMPLE);
     // Always paint a solid white underlay to avoid transparent regions when restoring
-    ctx.clearRect(0,0,logicalW,logicalH);
+    ctx.clearRect(0,0,LOGICAL_W,LOGICAL_H);
     ctx.fillStyle = '#ffffff';
-    ctx.fillRect(0,0,logicalW,logicalH);
+    ctx.fillRect(0,0,LOGICAL_W,LOGICAL_H);
     ctx.globalCompositeOperation = 'source-over';
-    ctx.drawImage(img, 0, 0, logicalW, logicalH);
+    ctx.drawImage(img, 0, 0, LOGICAL_W, LOGICAL_H);
         ctx.restore();
         restoredRef.current = true;
       };
@@ -1053,6 +1202,8 @@ export const Canvas = forwardRef<HTMLCanvasElement, CanvasProps>(({
 
     const handlePointerMove = (e: React.PointerEvent<HTMLCanvasElement>) => {
       if (disabled) return;
+      // Touch: pinch/pending handled here; an active touch stroke falls through to draw.
+      if (e.pointerType === 'touch') { if (onTouchPointerMove(e)) return; }
   if (!penActionRef.current) return;
       
       const container = containerRef.current!;
@@ -1069,7 +1220,7 @@ export const Canvas = forwardRef<HTMLCanvasElement, CanvasProps>(({
       // Handle drawing/erasing - only when explicitly in draw or erase mode
   if ((penActionRef.current === 'draw' || penActionRef.current === 'erase') && lastPointRef.current && activeDrawPointerIdRef.current === e.pointerId) {
         const native = e.nativeEvent as PointerEvent & { offsetX: number; offsetY: number };
-        const pos = { x: native.offsetX / zoom, y: native.offsetY / zoom };
+        const pos = toLogicalPos(native.offsetX, native.offsetY);
         
         const nativePressure = (e.nativeEvent as any).pressure as number | undefined;
         const pressure = typeof nativePressure === 'number' ? nativePressure : 0;
@@ -1121,10 +1272,9 @@ export const Canvas = forwardRef<HTMLCanvasElement, CanvasProps>(({
     };
 
     const handlePointerUp = (e: React.PointerEvent<HTMLCanvasElement>) => {
+      if (e.pointerType === 'touch') { onTouchPointerUp(e); return; }
       // Liberar la captura del pointer (si no es touch)
-      if (e.pointerType !== 'touch') {
-        (e.target as HTMLCanvasElement).releasePointerCapture(e.pointerId);
-      }
+      (e.target as HTMLCanvasElement).releasePointerCapture(e.pointerId);
       
       // Clean up based on current action
       if (penActionRef.current === 'pan' && activePanPointerIdRef.current === e.pointerId) {
