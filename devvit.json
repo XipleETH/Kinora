@@ -25,7 +25,8 @@
     "entry": "index.cjs"
   },
   "permissions": {
-    "media": true
+    "media": true,
+    "realtime": true
   },
   "menu": {
     "items": [

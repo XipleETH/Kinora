@@ -1,5 +1,7 @@
 import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import { Canvas } from './components/Canvas';
+import { SpectatorCanvas, type SpectatorHandle } from './components/SpectatorCanvas';
+import { useSpectate } from './hooks/useSpectate';
 import { allBrushPresets, BrushPreset } from './brushes';
 // import { ColorPalette } from './components/ColorPalette';
 import { SidePanels, PanelKey } from './components/SidePanels';
@@ -502,6 +504,23 @@ function App() {
       shareTimerRef.current = window.setTimeout(() => { shareTimerRef.current = null; doUpload(); }, 2500 - since);
     }
   }, [turnInfo, currentUser]);
+  // Immediate (throttle-bypassing) keyframe push — used after undo/fill so spectators
+  // reconcile to the authoritative frame quickly.
+  const shareLivePendingNow = useCallback(() => {
+    if (!canvasRef.current || !(turnInfo && turnInfo.currentArtist === currentUser)) return;
+    if (shareTimerRef.current != null) { clearTimeout(shareTimerRef.current); shareTimerRef.current = null; }
+    lastShareRef.current = Date.now();
+    try {
+      const dataUrl = canvasRef.current.toDataURL('image/png');
+      fetch(prefixIfLocal('/api/pending-frame'), { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-User': currentUser } as any, body: JSON.stringify({ dataUrl, user: currentUser }) }).catch(() => {});
+    } catch {}
+  }, [turnInfo, currentUser]);
+  // Relay a discrete canvas event (clear / fill) to spectators over realtime.
+  const postSpectateEvent = useCallback((body: any) => {
+    if (!(turnInfo && turnInfo.currentArtist === currentUser)) return;
+    fetch(prefixIfLocal('/api/spectate'), { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-User': currentUser } as any, body: JSON.stringify({ ...body, user: currentUser }) }).catch(() => {});
+  }, [turnInfo, currentUser]);
+
   // Combined onDirty: keep the local draft AND stream a live snapshot to spectators.
   const handleCanvasDirty = useCallback(() => { persistDraft(); shareLivePending(); }, [persistDraft, shareLivePending]);
 
@@ -559,6 +578,55 @@ function App() {
     })();
     return () => { cancelled = true; };
   }, [turnInfo?.currentArtist, turnInfo?.windowStart, currentUser]);
+
+  // --- Phase 2: realtime live strokes ---------------------------------------------
+  // Artist side: coalesce smoothed segments and POST them ~every 150ms; the server
+  // relays each batch to spectators over realtime.
+  const strokeBatchRef = useRef<{ b: any; segs: number[][] } | null>(null);
+  const strokeTimerRef = useRef<number | null>(null);
+  const flushStrokes = useCallback(() => {
+    if (strokeTimerRef.current != null) { clearTimeout(strokeTimerRef.current); strokeTimerRef.current = null; }
+    const batch = strokeBatchRef.current;
+    strokeBatchRef.current = null;
+    if (!batch || !batch.segs.length) return;
+    fetch(prefixIfLocal('/api/stroke'), { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-User': currentUser } as any, body: JSON.stringify({ b: batch.b, segs: batch.segs, user: currentUser }) }).catch(() => {});
+  }, [currentUser]);
+  const handleArtistSegment = useCallback((seg: any) => {
+    const cur = strokeBatchRef.current;
+    if (cur && cur.b.sid !== seg.sid) flushStrokes(); // new stroke -> flush the previous one
+    if (!strokeBatchRef.current) {
+      strokeBatchRef.current = {
+        b: seg.erase
+          ? { sid: seg.sid, e: 1, sz: seg.size }
+          : { sid: seg.sid, e: 0, p: seg.preset, c: seg.color, sz: seg.size, o: seg.opacity, sp: seg.spacing },
+        segs: [],
+      };
+    }
+    const r = Math.round;
+    strokeBatchRef.current.segs.push(seg.erase
+      ? [r(seg.from.x), r(seg.from.y), r(seg.to.x), r(seg.to.y), r(seg.ctrl.x), r(seg.ctrl.y)]
+      : [r(seg.from.x), r(seg.from.y), r(seg.to.x), r(seg.to.y), r(seg.ctrl.x), r(seg.ctrl.y), Math.round((seg.dynamic || 0) * 100) / 100, Math.round((seg.velocity || 0) * 1000) / 1000]);
+    if (strokeBatchRef.current.segs.length >= 24) { flushStrokes(); return; }
+    if (strokeTimerRef.current == null) strokeTimerRef.current = window.setTimeout(flushStrokes, 150);
+  }, [flushStrokes]);
+  // Artist fill: relay it live (spectators flood-fill approximately) + a keyframe correction.
+  const handleArtistFill = useCallback((x: number, y: number, color: string) => {
+    postSpectateEvent({ t: 'fill', x: Math.round(x), y: Math.round(y), c: color });
+    shareLivePendingNow();
+  }, [postSpectateEvent, shareLivePendingNow]);
+
+  // Spectator side: subscribe to the realtime channel and paint live strokes.
+  const spectatorRef = useRef<SpectatorHandle | null>(null);
+  useSpectate({
+    active: isSpectating,
+    spectatorRef,
+    onTurn: () => {
+      // A turn started/ended — refetch authoritative turn state so the LIVE badge and the
+      // artist/spectator split update immediately instead of waiting for the 15s poll.
+      fetch(prefixIfLocal('/api/turn'), { headers: { 'X-User': currentUser } as any })
+        .then(r => (r.ok ? r.json() : null)).then(j => { if (j) setTurnInfo(j); }).catch(() => {});
+    },
+  });
 
   // Al finalizar la sesión se sube la última imagen cacheada
   // finalizingRef removed with legacy finalize code.
@@ -703,6 +771,8 @@ function App() {
   ctx.fillRect(0, 0, canvasRef.current.width, canvasRef.current.height);
   ctx.restore();
     }
+    // Tell spectators to clear too (instant + exact).
+    postSpectateEvent({ t: 'clear' });
   };
 
   const snapshotCanvas = () => {
@@ -724,6 +794,9 @@ function App() {
     const prev = undoStack[undoStack.length - 1];
     setUndoStack(undoStack.slice(0, -1));
     ctx.putImageData(prev, 0, 0);
+    // Reconcile spectators to the undone state via an immediate keyframe (the already-sent
+    // live strokes can't be un-sent, so the authoritative snapshot corrects them).
+    shareLivePendingNow();
   };
 
   // Frames from the current week only — used for onion skin and spectator view
@@ -800,7 +873,7 @@ function App() {
         <span className="max-w-[150px] truncate font-semibold flex items-center gap-1">
           {turnInfo?.currentArtist ? (
             <>
-              {isSpectating && <span className="inline-block w-2 h-2 rounded-full bg-red-600 animate-pulse shrink-0" aria-hidden="true" />}
+              {isSpectating && <span className="kinora-blink inline-block w-2.5 h-2.5 rounded-full bg-red-600 shrink-0" aria-hidden="true" />}
               <span className="truncate">u/{turnInfo.currentArtist}{isSpectating ? ' · LIVE' : ''}</span>
             </>
           ) : 'No artist'}
@@ -861,6 +934,13 @@ function App() {
                   </div>
                 )}
                 <div className="flex justify-center">
+                    {isSpectating ? (
+                    <SpectatorCanvas
+                      ref={spectatorRef}
+                      maxHeight={!isMobile ? panelsHeight : undefined}
+                      baseImage={sharedPending?.imageData || (currentWeekFrames.length ? currentWeekFrames[currentWeekFrames.length-1]?.imageData : null)}
+                    />
+                    ) : (
                     <Canvas
                       key={`canvas-${turnInfo?.currentArtist || 'none'}-${frames.length ? frames[frames.length-1].key : 'empty'}-${resumeNonce}`}
                       ref={canvasRef}
@@ -885,10 +965,10 @@ function App() {
                       // Spectators see the last finalized frame fully; artist sees their draft (if any)
                       restoreImage={(turnInfo && turnInfo.currentArtist === currentUser) ? draftImage : (currentWeekFrames.length ? currentWeekFrames[currentWeekFrames.length-1]?.imageData : null)}
                       // Live spectator: overlay the artist's in-progress frame, refreshed ~2.5s
-                      spectating={isSpectating}
-                      liveImage={isSpectating ? (sharedPending?.imageData || null) : null}
-                      liveLabel={turnInfo?.currentArtist || ''}
+                      onSegment={handleArtistSegment}
+                      onFill={handleArtistFill}
                     />
+                    )}
                 </div>
                 {!isMobile && paletteSide === 'left' && (
                   <div className="flex flex-col gap-2 pt-2">

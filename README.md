@@ -11,6 +11,7 @@ Built on **Devvit Web** (Reddit's developer platform). Submitted to the **Reddit
 Kinora is a **shared creative experience** with retention built into its core loop:
 
 - **The hook = a movie you can only make together.** No single person can finish the animation. You draw your frame on top of the previous artist's frame (onion‑skin guide), then hand the pencil to the next redditor. The payoff — the finished weekly GIF — only exists because the whole community showed up.
+- **Watch it unfold live.** While one redditor draws, everyone else watches the strokes — with their real brush effects — appear in real time (Devvit realtime), behind a blinking "u/artist · LIVE" indicator. Each frame is a tiny live performance, not just a result.
 - **Retention mechanics.** A weekly cycle (new theme every Sunday), community voting on next week's palette/theme/brushes/director, timed drawing turns, an onion‑skin that pulls you into "continue the story," and a **weekly animation reveal** that publishes automatically. There's always a reason to come back.
 - **100% user contributions.** Every pixel in every frame is drawn by a redditor. The app contributes only the constraints (palette, brushes) and the stage.
 - **Mobile‑first.** Draw with your finger on your phone in a vertical, full‑screen canvas — the same experience scales up to desktop.
@@ -27,14 +28,17 @@ The week resets every **Sunday 7:00 PM (Colombia / UTC‑5) = Monday 00:00 UTC**
 ### 2. Drawing turns
 Artists take **exclusive timed turns** (soft lock in Redis) so no two people draw the same frame at once. During a turn you draw on a blank canvas with a faint **onion‑skin** of the previous frame as a guide, using only that week's palette + brushes. Save the frame and it joins the movie.
 
-### 3. Automatic showcase posts
+### 3. Watch it happen live
+While the current artist draws, every other viewer watches the **strokes render in real time over Devvit realtime** — the *actual* brush effects (ink taper, watercolor rim, spray, glow…), reproduced by a shared brush engine both sides run, not a flat placeholder. Eraser, fill and clear stream live too. Because clients can't publish on realtime directly, the artist's smoothed segments round‑trip through the server (~150 ms batches), and a periodic **keyframe snapshot** keeps late‑joiners and any dropped messages perfectly in sync. A turn can also be **resumed from another device** — or after closing the app — because the in‑progress frame is shared server‑side, not just cached locally.
+
+### 4. Automatic showcase posts
 This is where Kinora leans on Reddit itself:
 
 - A **weekly announcement post** is auto‑created with the theme, palette swatches, brushes, and director.
 - Each user's saved frame is **auto‑posted as an image comment** on the weekly post, grouped by day and artist.
 - When the week ends, all frames are compiled into an **animated GIF** (12 fps) and **auto‑published as a new post** in the subreddit — the community's finished short film.
 
-### 4. Playback
+### 5. Playback
 Browse frames in the gallery, scrub the weekly carousel, or watch the compiled GIF.
 
 ---
@@ -67,6 +71,7 @@ The canvas and UI were rebuilt to be genuinely usable on a phone:
 | Post UI (WebView) | React + Vite + Tailwind | Canvas, gallery, video carousel, weekly voting, chat |
 | Server | Devvit Web (Node) | Turn locks, frame save, voting/tally, weekly rollover, showcase + GIF cron |
 | Fast store | Redis (Devvit) | Week anchor, session locks (TTL), vote counters, frame metadata |
+| Live spectating | Devvit realtime | Broadcast the artist's stroke batches + keyframes + turn changes to viewers |
 | Image storage | Reddit Media API (`i.redd.it`) | Frame PNGs + weekly animation GIF |
 | GIF encoding | `gifenc` + `upng-js` | Decode frames → resize to 720×1280 → encode 12 fps GIF |
 
@@ -116,10 +121,12 @@ npm run dev:vite   # http://localhost:7474
 src/
   client/           # React post UI
     app/
-      components/   # Canvas, SidePanels, Header, FrameGallery, VideoPlayer, Chat, PaletteVoting…
+      components/   # Canvas (artist), SpectatorCanvas (live viewer), SidePanels, Header, FrameGallery, PaletteVoting…
+      hooks/        # useSpectate — subscribes to the realtime channel and paints incoming strokes
+      brushEngine.ts # shared per-engine stroke renderer used by BOTH artist and spectator
       brushes.ts    # brush presets / engine params
   server/
-    index.ts        # Devvit Web server: turns, frames, voting, weekly cron, GIF job
+    index.ts        # Devvit Web server: turns, frames, voting, weekly cron, GIF job, realtime relay
     presets.ts      # house presets (theme list + palette/brush generators) for empty weeks
   shared/           # shared types
 ```
@@ -128,7 +135,7 @@ src/
 
 ## Status
 
-Concept‑complete and installed live on r/Kinora. Recent updates for the hackathon: an **upgraded brush engine** (velocity dynamics + tremor stabilizer on finger and mouse, quadratic smoothing, and per‑brush polish — watercolor rim, glow core, smudge color‑drag), a **color‑wheel palette picker**, **live brush previews** in the voting wizard, native Reddit Media API storage, automatic frame + weekly‑GIF posts, mobile finger‑drawing with a vertical fixed‑resolution canvas, community voting with house‑preset fallback, and a paper‑sketch UI polished for both mobile and desktop.
+Concept‑complete and installed live on r/Kinora. Recent updates for the hackathon: **live spectating over Devvit realtime** (watch the current artist's strokes — with real brush effects — appear in real time, plus live eraser/fill/clear and a "u/artist · LIVE" badge), **cross‑device turn resume** (continue an in‑progress frame on another device or after closing the app), an **upgraded brush engine** (velocity dynamics + tremor stabilizer on finger and mouse, quadratic smoothing, per‑brush polish — watercolor rim, glow core, smudge color‑drag) now shared between the artist and spectators, a **color‑wheel palette picker**, **live brush previews** in the voting wizard, native Reddit Media API storage, automatic frame + weekly‑GIF posts, mobile finger‑drawing with a vertical fixed‑resolution canvas, community voting with house‑preset fallback, and a paper‑sketch UI polished for both mobile and desktop.
 
 ---
 

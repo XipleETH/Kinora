@@ -1,5 +1,9 @@
 @import 'tailwindcss';
 
+/* Distinct on/off blink for the LIVE indicator (stronger than Tailwind's animate-pulse). */
+@keyframes kinora-blink { 0%, 100% { opacity: 1; } 50% { opacity: 0.12; } }
+.kinora-blink { animation: kinora-blink 1s ease-in-out infinite; }
+
 /* Previene rebotes y desplazamientos indeseados durante dibujo táctil */
 html, body {
 	height: 100%;

@@ -1,6 +1,6 @@
 import express from 'express';
 import { InitResponse, IncrementResponse, DecrementResponse } from '../shared/types/api';
-import { redis, reddit, createServer, context, getServerPort, media, scheduler } from '@devvit/web/server';
+import { redis, reddit, createServer, context, getServerPort, media, scheduler, realtime } from '@devvit/web/server';
 import { createPost } from './core/post';
 import { getHouseBundle, houseWinnersForWeek, buildHouseProposals, HOUSE_DIRECTOR } from './presets';
 import crypto from 'node:crypto';
@@ -983,6 +983,7 @@ router.post('/api/turn', async (_req, res) => {
       state.windowStart = now;
       state.windowEnd = now + TWO_HOURS_MS;
       await saveTurn(state);
+      await broadcastSpectate(context.postId, { t: 'turn', a: state.currentArtist, windowEnd: state.windowEnd });
       return res.json({ ok: true, action: 'start', claimed: true, currentArtist: state.currentArtist });
     }
     // If same user as current artist, confirm continuity (but don't extend window)
@@ -1053,6 +1054,9 @@ router.post('/api/pending-frame', async (req, res) => {
     }
     state.hasPendingFrame = true;
     await saveTurn(state);
+    // Broadcast a keyframe so spectators self-heal (repaint the authoritative base) between
+    // the lightweight realtime stroke deltas.
+    if (mediaUrl) await broadcastSpectate(postId, { t: 'key', a: username, url: mediaUrl, ver: Date.now() });
     res.json({ ok: true, storage: mediaUrl ? 'reddit' : 'redis' });
   } catch(e:any) {
     console.error('[pending:post] error', e?.message);
@@ -1149,6 +1153,8 @@ router.post('/api/finalize-turn', async (_req, res) => {
     // Reset window so Start Turn is available immediately
     state = await resetTurnWindow();
     await saveTurn(state);
+    // Tell spectators the turn ended so they clear the LIVE indicator immediately.
+    await broadcastSpectate(postId, { t: 'turn', a: null, windowEnd: 0 });
     // Read showcase debug log
     let showcaseDebug: string[] = [];
     try {
@@ -1159,6 +1165,75 @@ router.post('/api/finalize-turn', async (_req, res) => {
   } catch(e:any) {
     console.error('[finalize-turn] error', e?.message);
     res.status(500).json({ error: 'finalize failed' });
+  }
+});
+
+// --- Live spectating over Devvit realtime -------------------------------------------
+// The artist's stroke batches round-trip through the server (clients cannot publish on
+// realtime directly), which relays them to spectators. Channel is scoped to the post.
+function spectateChannel(postId: string): string {
+  // postId is `t3_...` (alphanumeric + underscore), so it passes realtime's channel validator.
+  return `spectate_${postId}`;
+}
+async function broadcastSpectate(postId: string | undefined, msg: any): Promise<void> {
+  if (!postId) return;
+  try {
+    await realtime.send(spectateChannel(postId), msg);
+  } catch (e: any) {
+    console.warn('[spectate] realtime send failed (non-fatal):', e?.message);
+  }
+}
+
+// Artist streams smoothed stroke segments here; server relays to spectators in realtime.
+router.post('/api/stroke', async (req, res) => {
+  try {
+    const { postId } = context;
+    if (!postId) return res.status(400).json({ error: 'post not found' });
+    const resolveUser = async (): Promise<string> => {
+      try { const u = await reddit.getCurrentUsername(); if (u) return u; } catch {}
+      const b = typeof req?.body?.user === 'string' && req.body.user.trim() ? req.body.user.trim() : '';
+      const h = typeof req?.headers?.['x-user'] === 'string' && (req.headers['x-user'] as string).trim() ? (req.headers['x-user'] as string).trim() : '';
+      return b || h || 'anonymous';
+    };
+    const username = await resolveUser();
+    const state = await loadTurn();
+    if (username !== state.currentArtist) return res.status(403).json({ error: 'not artist' });
+    const segs = req.body?.segs;
+    if (!Array.isArray(segs) || !segs.length) return res.json({ ok: true, skipped: true });
+    await broadcastSpectate(postId, { t: 'stroke', a: username, b: req.body?.b || {}, segs });
+    res.json({ ok: true });
+  } catch (e: any) {
+    console.error('[stroke] error', e?.message);
+    res.status(500).json({ error: 'stroke failed' });
+  }
+});
+
+// Artist relays discrete canvas events (clear / fill) to spectators in realtime.
+router.post('/api/spectate', async (req, res) => {
+  try {
+    const { postId } = context;
+    if (!postId) return res.status(400).json({ error: 'post not found' });
+    const resolveUser = async (): Promise<string> => {
+      try { const u = await reddit.getCurrentUsername(); if (u) return u; } catch {}
+      const b = typeof req?.body?.user === 'string' && req.body.user.trim() ? req.body.user.trim() : '';
+      const h = typeof req?.headers?.['x-user'] === 'string' && (req.headers['x-user'] as string).trim() ? (req.headers['x-user'] as string).trim() : '';
+      return b || h || 'anonymous';
+    };
+    const username = await resolveUser();
+    const state = await loadTurn();
+    if (username !== state.currentArtist) return res.status(403).json({ error: 'not artist' });
+    const t = req.body?.t;
+    if (t === 'clear') {
+      await broadcastSpectate(postId, { t: 'clear', a: username });
+    } else if (t === 'fill') {
+      await broadcastSpectate(postId, { t: 'fill', a: username, x: req.body.x, y: req.body.y, c: req.body.c });
+    } else {
+      return res.json({ ok: true, skipped: true });
+    }
+    res.json({ ok: true });
+  } catch (e: any) {
+    console.error('[spectate] error', e?.message);
+    res.status(500).json({ error: 'spectate failed' });
   }
 });
 
