@@ -29,6 +29,13 @@ interface CanvasProps {
   // Desktop only: cap the displayed canvas height (px) so it ends level with the side
   // tool panels. The 9:16 aspect is preserved (width follows).
   maxHeight?: number;
+  // Live spectator view: when `spectating`, the user is logged in but not the current
+  // artist. Show `liveImage` (the artist's in-progress frame) fully over the canvas and
+  // replace the dim "login to draw" overlay with a small LIVE chip. Reactive: updating
+  // liveImage repaints without a remount.
+  liveImage?: string | null;
+  spectating?: boolean;
+  liveLabel?: string;
 }
 
 // Default canvas size — 9:16 PORTRAIT (vertical, Reels/TikTok format)
@@ -51,7 +58,8 @@ const SUPERSAMPLE = 2;             // backing store = 720x1280
 
 export const Canvas = forwardRef<HTMLCanvasElement, CanvasProps>(({
   activeColor, brushSize, brushSpacing, brushOpacity, isDrawing, setIsDrawing, disabled,
-  brushPreset, tool = 'draw', onBeforeMutate, zoom: controlledZoom, onionImage, onionOpacity = 0.4, onDirty, restoreImage, onZoomChange, maxHeight
+  brushPreset, tool = 'draw', onBeforeMutate, zoom: controlledZoom, onionImage, onionOpacity = 0.4, onDirty, restoreImage, onZoomChange, maxHeight,
+  liveImage, spectating = false, liveLabel
 }, ref) => {
   const internalRef = useRef<HTMLCanvasElement>(null);
   const canvasRef = (ref as React.RefObject<HTMLCanvasElement>) || internalRef;
@@ -1235,6 +1243,11 @@ export const Canvas = forwardRef<HTMLCanvasElement, CanvasProps>(({
       const canvas = canvasRef.current; if (!canvas) return;
       const ctx = canvas.getContext('2d', { willReadFrequently: true }); if (!ctx) return;
       const img = new Image();
+      // Remote (CDN) restore images must be CORS-enabled, or drawing them taints the canvas
+      // and breaks the artist's toDataURL autosave. i.redd.it serves permissive CORS; if the
+      // load fails we simply leave the canvas untouched (never tainted).
+      if (/^https?:/i.test(restoreImage)) img.crossOrigin = 'anonymous';
+      img.onerror = () => { /* load failed (e.g. CORS): keep the canvas as-is */ };
       img.onload = () => {
         ctx.save();
         ctx.setTransform(1,0,0,1,0,0);
@@ -1392,7 +1405,7 @@ export const Canvas = forwardRef<HTMLCanvasElement, CanvasProps>(({
           )}
           <canvas
             ref={canvasRef}
-            className={`${disabled ? 'opacity-50 cursor-not-allowed' : 'cursor-crosshair'} absolute inset-0 canvas-paper sketch-outline select-none transition-opacity`}
+            className={`${disabled ? (spectating ? 'cursor-default' : 'opacity-50 cursor-not-allowed') : 'cursor-crosshair'} absolute inset-0 canvas-paper sketch-outline select-none transition-opacity`}
             data-drawing={isDrawing ? 'true' : 'false'}
             style={{
               width: '100%',
@@ -1409,10 +1422,26 @@ export const Canvas = forwardRef<HTMLCanvasElement, CanvasProps>(({
             onPointerLeave={handlePointerUp}
             onContextMenu={(e) => e.preventDefault()}
           />
+          {/* Live spectator overlay: the artist's in-progress frame, painted fully on top
+              and refreshed reactively as new snapshots arrive. */}
+          {liveImage && (
+            <img
+              src={liveImage}
+              alt="live drawing"
+              className="absolute inset-0 pointer-events-none canvas-paper sketch-outline"
+              style={{ width: '100%', height: '100%', objectFit: 'fill', opacity: 1 }}
+            />
+          )}
         </div>
-        {disabled && (
+        {disabled && !spectating && (
           <div className="absolute inset-0 flex items-center justify-center bg-black/30">
             <p className="text-sm font-semibold" style={{ color: '#111' }}>Inicia sesión para dibujar</p>
+          </div>
+        )}
+        {spectating && (
+          <div className="absolute top-2 left-2 z-10 flex items-center gap-1.5 px-2 py-1 rounded-full bg-black/70 text-white text-[11px] font-bold pointer-events-none select-none">
+            <span className="inline-block w-2 h-2 rounded-full bg-red-500 animate-pulse" aria-hidden="true" />
+            <span className="truncate max-w-[160px]">LIVE{liveLabel ? ` · u/${liveLabel}` : ''}</span>
           </div>
         )}
       </div>

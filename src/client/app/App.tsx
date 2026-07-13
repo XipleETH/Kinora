@@ -224,14 +224,23 @@ function App() {
   const [undoStack, setUndoStack] = useState<ImageData[]>([]);
   const [draftImage, setDraftImage] = useState<string | null>(null);
 
-  // Draft persistence (localStorage + future server/Redis hook)
+  // Draft persistence (localStorage + shared server pending frame for cross-device resume)
   const DRAFT_KEY = 'kinora:current-draft';
+  const DRAFT_META_KEY = 'kinora:current-draft-meta'; // { ts, windowStart, user } to compare freshness across devices
   useEffect(() => {
     try {
       const stored = localStorage.getItem(DRAFT_KEY);
       if (stored) setDraftImage(stored);
     } catch {}
   }, []);
+  // Mirror draftImage in a ref so the resume effect can read the current value without
+  // re-running every time the draft changes mid-stroke.
+  const draftImageRef = useRef<string | null>(null);
+  useEffect(() => { draftImageRef.current = draftImage; }, [draftImage]);
+  // Bumped once per turn when we resolve the resume image, forcing the Canvas to remount
+  // and paint it (the restore is a one-time draw guarded inside Canvas).
+  const [resumeNonce, setResumeNonce] = useState(0);
+  const resumedTurnRef = useRef<number>(-1);
 
   // User identity derive from ?user= or localStorage
   useEffect(() => {
@@ -330,10 +339,13 @@ function App() {
     try {
       const dataUrl = canvasRef.current.toDataURL('image/png');
       localStorage.setItem(DRAFT_KEY, dataUrl);
+      // Stamp the draft with the current turn + time so we can (a) tell whether a stored
+      // local draft belongs to THIS turn and (b) compare its freshness against the shared
+      // server copy when resuming on another device.
+      try { localStorage.setItem(DRAFT_META_KEY, JSON.stringify({ ts: Date.now(), windowStart: turnInfo?.windowStart || 0, user: currentUser })); } catch {}
       setDraftImage(dataUrl);
-      // TODO: Optional: throttle + POST to a Devvit server endpoint to store in Redis for cross-device continuity.
     } catch {}
-  }, []);
+  }, [turnInfo?.windowStart, currentUser]);
 
   // Countdown robust: use server windowEnd/timeToEndSeconds; correct drift periodically
   const countdownRef = useRef<{ targetMs: number; lastServerSync: number; lastDisplayed: number }>({ targetMs: 0, lastServerSync: 0, lastDisplayed: 0 });
@@ -467,6 +479,87 @@ function App() {
     })();
   }, [turnInfo, currentUser, persistDraft]);
 
+  // --- Live spectating (Phase 1: throttled snapshot streaming) ---------------------
+  // True when the user is logged in but someone ELSE holds the drawing turn.
+  const isSpectating = Boolean(turnInfo?.currentArtist && currentUser && turnInfo.currentArtist !== currentUser);
+  // While the artist draws, push a fresh snapshot of the canvas to the shared pending
+  // endpoint at most every ~2.5s (trailing), so spectators see near-live progress
+  // instead of only the last manual Save.
+  const lastShareRef = useRef<number>(0);
+  const shareTimerRef = useRef<number | null>(null);
+  const shareLivePending = useCallback(() => {
+    if (!canvasRef.current || !(turnInfo && turnInfo.currentArtist === currentUser)) return;
+    const doUpload = () => {
+      lastShareRef.current = Date.now();
+      try {
+        const dataUrl = canvasRef.current!.toDataURL('image/png');
+        fetch(prefixIfLocal('/api/pending-frame'), { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-User': currentUser } as any, body: JSON.stringify({ dataUrl, user: currentUser }) }).catch(() => {});
+      } catch {}
+    };
+    const since = Date.now() - lastShareRef.current;
+    if (since >= 2500) { doUpload(); }
+    else if (shareTimerRef.current == null) {
+      shareTimerRef.current = window.setTimeout(() => { shareTimerRef.current = null; doUpload(); }, 2500 - since);
+    }
+  }, [turnInfo, currentUser]);
+  // Combined onDirty: keep the local draft AND stream a live snapshot to spectators.
+  const handleCanvasDirty = useCallback(() => { persistDraft(); shareLivePending(); }, [persistDraft, shareLivePending]);
+
+  // Cross-device turn resume: when we ARE the current artist, pick the freshest in-progress
+  // image between the local draft (this device) and the shared server pending frame
+  // (whatever device drew last) and restore it, so the turn continues seamlessly across
+  // devices / after the app is closed. Runs once per turn (keyed by windowStart).
+  useEffect(() => {
+    if (!turnInfo || !currentUser) return;
+    const ws = turnInfo.windowStart || 0;
+    const isArtist = turnInfo.currentArtist === currentUser;
+    if (!isArtist || !ws) return;
+    if (resumedTurnRef.current === ws) return; // already resolved for this turn
+    resumedTurnRef.current = ws;
+    let cancelled = false;
+    (async () => {
+      // Local candidate — only if the stored draft belongs to THIS turn (avoids leaking a
+      // previous turn's work into a new frame).
+      let local: { url: string; ts: number } | null = null;
+      try {
+        const metaRaw = localStorage.getItem(DRAFT_META_KEY);
+        const draft = localStorage.getItem(DRAFT_KEY);
+        if (metaRaw && draft) {
+          const meta = JSON.parse(metaRaw);
+          if (meta && meta.windowStart === ws && meta.user === currentUser) local = { url: draft, ts: meta.ts || 0 };
+        }
+      } catch {}
+      // Server candidate — the shared pending frame. The server only exposes a pending
+      // frame for the current turn's artist, so if present it is safely ours.
+      let server: { url: string; ts: number } | null = null;
+      try {
+        const r = await fetch(prefixIfLocal('/api/pending-frame'), { headers: { 'X-User': currentUser } as any });
+        if (r.ok) {
+          const j = await r.json();
+          const p = j && j.pending;
+          if (p && p.url && (!p.artist || p.artist === currentUser)) {
+            const raw: string = p.url;
+            const url = raw.startsWith('data:') ? raw : raw + (raw.includes('?') ? '&' : '?') + 'v=' + (p.lastModified || Date.now());
+            server = { url, ts: p.lastModified || 0 };
+          }
+        }
+      } catch {}
+      if (cancelled) return;
+      // Prefer whichever is newer; server wins ties (it's the cross-device source of truth).
+      const best = (local && server) ? (server.ts >= local.ts ? server : local) : (server || local);
+      if (best && best.url !== draftImageRef.current) {
+        setDraftImage(best.url);
+        setResumeNonce(n => n + 1); // remount Canvas so restoreImage(best) paints once
+      } else if (!best && draftImageRef.current) {
+        // Fresh turn with no in-progress work anywhere (any local draft belongs to an old,
+        // unfinalized turn) — start on a clean frame instead of inheriting stale content.
+        setDraftImage(null);
+        setResumeNonce(n => n + 1);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [turnInfo?.currentArtist, turnInfo?.windowStart, currentUser]);
+
   // Al finalizar la sesión se sube la última imagen cacheada
   // finalizingRef removed with legacy finalize code.
   // Removed legacy finalizeSessionUpload (external upload disabled). ForceEndSession now handles finalize.
@@ -492,7 +585,7 @@ function App() {
          setPendingFrameDataUrl(null);
          setSharedPending(null);
          // Clear draft (local) after finalize so next artist starts clean
-         try { localStorage.removeItem(DRAFT_KEY); } catch {}
+         try { localStorage.removeItem(DRAFT_KEY); localStorage.removeItem(DRAFT_META_KEY); } catch {}
          setDraftImage(null);
          // Proactively clear canvas for local view
          if (canvasRef.current) {
@@ -538,10 +631,11 @@ function App() {
         } catch {}
       };
       fetchPending();
-      interval = window.setInterval(fetchPending, 10000);
+      // Poll fast while spectating a live turn so the canvas feels live; slow otherwise.
+      interval = window.setInterval(fetchPending, isSpectating && currentView === 'draw' ? 2500 : 10000);
     }
     return () => { if (interval) window.clearInterval(interval); };
-  }, [currentView, currentUser]);
+  }, [currentView, currentUser, isSpectating]);
 
   // Auto finalize when window ends and we were the artist
   const prevArtistRef = useRef<string | null>(null);
@@ -703,7 +797,14 @@ function App() {
           <span className="tabular-nums">{formatCountdown(timeLeft)}</span>
         </span>
         <span className="opacity-50">|</span>
-        <span className="max-w-[130px] truncate font-semibold">{turnInfo?.currentArtist ? `u/${turnInfo.currentArtist}` : 'No artist'}</span>
+        <span className="max-w-[150px] truncate font-semibold flex items-center gap-1">
+          {turnInfo?.currentArtist ? (
+            <>
+              {isSpectating && <span className="inline-block w-2 h-2 rounded-full bg-red-600 animate-pulse shrink-0" aria-hidden="true" />}
+              <span className="truncate">u/{turnInfo.currentArtist}{isSpectating ? ' · LIVE' : ''}</span>
+            </>
+          ) : 'No artist'}
+        </span>
       </div>
       {/* Minimal spacer (5px) below fixed debug bar */}
       <div style={{height:'5px'}} aria-hidden="true" />
@@ -761,7 +862,7 @@ function App() {
                 )}
                 <div className="flex justify-center">
                     <Canvas
-                      key={`canvas-${turnInfo?.currentArtist || 'none'}-${frames.length ? frames[frames.length-1].key : 'empty'}`}
+                      key={`canvas-${turnInfo?.currentArtist || 'none'}-${frames.length ? frames[frames.length-1].key : 'empty'}-${resumeNonce}`}
                       ref={canvasRef}
                       activeColor={activeColor}
                       brushSize={brushSize}
@@ -780,9 +881,13 @@ function App() {
                       // Filter to current week so new weeks start with a blank canvas
                       onionImage={(turnInfo && turnInfo.currentArtist === currentUser && currentWeekFrames.length) ? currentWeekFrames[currentWeekFrames.length-1]?.imageData : undefined}
                       onionOpacity={onionOpacity}
-                      onDirty={persistDraft}
+                      onDirty={handleCanvasDirty}
                       // Spectators see the last finalized frame fully; artist sees their draft (if any)
                       restoreImage={(turnInfo && turnInfo.currentArtist === currentUser) ? draftImage : (currentWeekFrames.length ? currentWeekFrames[currentWeekFrames.length-1]?.imageData : null)}
+                      // Live spectator: overlay the artist's in-progress frame, refreshed ~2.5s
+                      spectating={isSpectating}
+                      liveImage={isSpectating ? (sharedPending?.imageData || null) : null}
+                      liveLabel={turnInfo?.currentArtist || ''}
                     />
                 </div>
                 {!isMobile && paletteSide === 'left' && (

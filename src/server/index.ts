@@ -1009,7 +1009,7 @@ router.get('/api/pending-frame', async (_req, res) => {
           const data = JSON.parse(raw);
           // data may have mediaUrl (uploaded to Reddit CDN) or dataUrl (legacy/fallback)
           const url = data.mediaUrl || data.dataUrl || '';
-          return res.json({ pending: { url, lastModified: data.updated } });
+          return res.json({ pending: { url, lastModified: data.updated, artist: data.artist } });
         } catch {}
       }
     }
@@ -1045,11 +1045,11 @@ router.post('/api/pending-frame', async (req, res) => {
     if (mediaUrl) {
       console.log('[pending:post] uploaded successfully:', mediaUrl);
       // Store only the small URL string in Redis (not the huge data URL)
-      await redis.set(PENDING_FRAME_DATA_KEY(postId), JSON.stringify({ mediaUrl, updated: Date.now() }));
+      await redis.set(PENDING_FRAME_DATA_KEY(postId), JSON.stringify({ mediaUrl, updated: Date.now(), artist: username }));
     } else {
       console.warn('[pending:post] CDN upload failed, storing dataUrl in Redis as fallback');
       // Fallback: store data URL directly (may fail for large images)
-      await redis.set(PENDING_FRAME_DATA_KEY(postId), JSON.stringify({ dataUrl, updated: Date.now() }));
+      await redis.set(PENDING_FRAME_DATA_KEY(postId), JSON.stringify({ dataUrl, updated: Date.now(), artist: username }));
     }
     state.hasPendingFrame = true;
     await saveTurn(state);
