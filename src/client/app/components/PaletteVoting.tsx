@@ -1,5 +1,7 @@
 import React, { useEffect, useMemo, useState, useCallback } from 'react';
 import { allBrushPresets } from '../brushes';
+import { ColorWheelPicker } from './ColorWheelPicker';
+import { BrushPreview } from './BrushPreview';
 
 interface PaletteVotingProps {}
 
@@ -107,6 +109,7 @@ export const PaletteVoting: React.FC<PaletteVotingProps> = () => {
   // Wizard state
   const [wizTheme, setWizTheme] = useState('');
   const [wizPaletteColors, setWizPaletteColors] = useState<string[]>(['#FF6B6B','#4ECDC4','#45B7D1','#96CEB4','#FFEAA7','#DDA0DD']);
+  const [activePaletteIndex, setActivePaletteIndex] = useState(0);
   const [wizBrushIds, setWizBrushIds] = useState<string[]>([]);
   const [wizardStep, setWizardStep] = useState<1|2|3>(1);
   const wizValidTheme = wizTheme.trim().length >= 3;
@@ -146,17 +149,32 @@ export const PaletteVoting: React.FC<PaletteVotingProps> = () => {
 
   return (
     <div className="paper-shell pencil-theme px-4 py-6 mx-auto max-w-6xl">
-      <div className="sketch-border rounded-xl p-6 mb-8 bg-[#FAF3E0] shadow-[4px_4px_0_0_#000]">
-        <h2 className="text-4xl font-extrabold mb-2 tracking-wide text-black">Weekly Voting</h2>
-        <p className="text-black/70 text-sm md:text-base leading-relaxed">Propose and vote a weekly bundle: <strong>Theme</strong> + <strong>Palette (6)</strong> + <strong>Brushes (up to 4)</strong>. A single vote adds 1 to all three underlying proposals.</p>
-        {currentUser && <p className="mt-2 text-black/70 text-sm">Logged in as <span className="font-semibold text-black">u/{currentUser}</span></p>}
-      </div>
       <div className="space-y-10">
         <section className="sketch-border rounded-2xl p-6 bg-[#FFF9EE] shadow-[4px_4px_0_0_#000]">
           <h3 className="text-2xl font-bold text-black mb-4">Create weekly bundle</h3>
           <div className="flex flex-col gap-6">
-            <div className="flex items-center gap-2 text-xs">
-              {[1,2,3].map(s => <div key={s} className={`sketch-border px-3 py-1 rounded-md font-semibold ${wizardStep===s ? 'bg-yellow-200':'bg-white'}`}>Step {s}</div>)}
+            <div className="flex flex-col gap-2">
+              <span className="text-[11px] font-bold uppercase tracking-wide text-black/50">Select — step {wizardStep} of 3</span>
+              <div className="flex flex-wrap items-center gap-2">
+                {([[1,'Theme'],[2,'Palette'],[3,'Brushes']] as [1|2|3,string][]).map(([n,name])=>{
+                  const active = wizardStep===n;
+                  const done = wizardStep>n;
+                  return (
+                    <button
+                      key={n}
+                      type="button"
+                      onClick={()=>{ if(n<=wizardStep) setWizardStep(n); }}
+                      disabled={n>wizardStep}
+                      aria-current={active ? 'step' : undefined}
+                      style={{ backgroundColor: active ? '#FDE047' : done ? '#A7F3D0' : '#FFFFFF' }}
+                      className={`sketch-border flex items-center gap-1.5 px-2.5 py-1.5 rounded-md text-xs font-bold transition ${n>wizardStep?'opacity-50 cursor-not-allowed':'cursor-pointer'}`}
+                    >
+                      <span style={{ backgroundColor: active ? '#000000' : done ? '#34D399' : '#FFFFFF', color: active ? '#FFFFFF' : '#000000' }} className="w-5 h-5 rounded-full flex items-center justify-center text-[10px] border-2 border-black">{done?'✓':n}</span>
+                      <span>{name}</span>
+                    </button>
+                  );
+                })}
+              </div>
             </div>
             {wizardStep===1 && (
               <div className="space-y-3">
@@ -169,16 +187,25 @@ export const PaletteVoting: React.FC<PaletteVotingProps> = () => {
             )}
             {wizardStep===2 && (
               <div className="space-y-4">
-                <div className="flex flex-col md:flex-row md:items-center justify-between gap-3">
-                  <h4 className="text-black font-semibold">Palette (6 colors)</h4>
-                </div>
-                <div className="flex flex-wrap gap-4">
+                <h4 className="text-black font-semibold">Palette — tap a slot, then pick its color</h4>
+                <div className="flex flex-wrap gap-2 justify-center">
                   {wizPaletteColors.map((c,i)=>(
-                    <div key={i} className="flex flex-col items-center gap-1">
-                      <input type="color" value={c} onChange={e=>{ const arr=[...wizPaletteColors]; arr[i]=e.target.value.toUpperCase(); setWizPaletteColors(arr); }} className="w-12 h-12 rounded-md sketch-border cursor-pointer" />
-                      <input value={c} onChange={e=>{ const v=e.target.value.toUpperCase(); const arr=[...wizPaletteColors]; arr[i]=v; setWizPaletteColors(arr); }} className="w-20 text-xs px-2 py-1 rounded sketch-border bg-white text-black" />
-                    </div>
+                    <button
+                      key={i}
+                      type="button"
+                      onClick={()=>setActivePaletteIndex(i)}
+                      aria-label={`Color slot ${i+1}`}
+                      className="w-11 h-11 rounded-lg sketch-border cursor-pointer"
+                      style={{ background:c, outline: activePaletteIndex===i ? '3px solid #FDE047' : 'none', outlineOffset:'2px' }}
+                    />
                   ))}
+                </div>
+                <div className="text-center text-[11px] font-bold uppercase tracking-wide text-black/50">Editing slot {activePaletteIndex+1} of 6</div>
+                <div className="flex justify-center">
+                  <ColorWheelPicker
+                    value={wizPaletteColors[activePaletteIndex] || '#FF6B6B'}
+                    onChange={(hex)=>{ const arr=[...wizPaletteColors]; arr[activePaletteIndex]=hex; setWizPaletteColors(arr); }}
+                  />
                 </div>
                 <div className="flex justify-between items-center">
                   <button onClick={()=>setWizardStep(1)} className="sketch-border px-4 py-2 rounded-md bg-white text-black hover:bg-yellow-100 text-sm font-semibold">Back</button>
@@ -191,16 +218,25 @@ export const PaletteVoting: React.FC<PaletteVotingProps> = () => {
             )}
             {wizardStep===3 && (
               <div className="space-y-5">
-                <h4 className="text-black font-semibold">Select brushes (max 4)</h4>
-                <div className="flex flex-wrap gap-2">
+                <h4 className="text-black font-semibold">Brushes — pick up to 4 <span className="text-black/50 text-sm font-bold">({wizBrushIds.length}/4)</span></h4>
+                <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
                   {allBrushPresets.map(b=>{
                     const checked = wizBrushIds.includes(b.id);
                     const disabled = !checked && wizBrushIds.length>=4;
                     return (
-                      <label key={b.id} className={`sketch-border flex items-center gap-2 px-2 py-1 rounded-lg text-xs font-semibold ${checked? 'bg-yellow-200':'bg-white hover:bg-yellow-100'} ${disabled? 'opacity-40 cursor-not-allowed':''}`}>
-                        <input type="checkbox" className="accent-black" checked={checked} disabled={disabled} onChange={()=>toggleWizBrush(b.id)} />
-                        <span>{b.name}</span>
-                      </label>
+                      <button
+                        key={b.id}
+                        type="button"
+                        disabled={disabled}
+                        onClick={()=>toggleWizBrush(b.id)}
+                        aria-pressed={checked}
+                        style={{ backgroundColor: checked ? '#FDE047' : undefined }}
+                        className={`sketch-border rounded-lg p-2 flex flex-col items-center gap-1.5 ${disabled?'opacity-40 cursor-not-allowed':'cursor-pointer'}`}
+                      >
+                        <BrushPreview preset={b} />
+                        <span className="text-[11px] font-bold text-black text-center leading-tight">{b.name}</span>
+                        {checked && <span className="text-[9px] font-bold text-black/70">✓ selected</span>}
+                      </button>
                     );
                   })}
                 </div>

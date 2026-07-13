@@ -63,6 +63,12 @@ export const Canvas = forwardRef<HTMLCanvasElement, CanvasProps>(({
   const firstMoveRef = useRef<boolean>(false);
   // Guardamos la posición inicial para poder dibujar un "tap" como punto
   const strokeStartPosRef = useRef<{x:number;y:number}|null>(null);
+  // --- Brush dynamics + input smoothing (device-independent) ---
+  const smoothedPosRef = useRef<{x:number;y:number}|null>(null); // "pulled string" stabilizer anchor
+  const emaSpeedRef = useRef<number>(0);       // smoothed speed, logical px/ms
+  const emaPressureRef = useRef<number>(0.6);  // smoothed dynamic 0..1 (drives width/opacity)
+  const lastMoveTimeRef = useRef<number>(0);   // ms timestamp of last processed move
+  const strokePeakSpeedRef = useRef<number>(0.001);
   const containerRef = useRef<HTMLDivElement>(null);
   // Internal zoom state only used when no controlled zoom is supplied
   const [internalZoom] = useState(1);
@@ -131,7 +137,7 @@ export const Canvas = forwardRef<HTMLCanvasElement, CanvasProps>(({
       if (!canvas) return;
       canvas.width = LOGICAL_W * SUPERSAMPLE;   // 720
       canvas.height = LOGICAL_H * SUPERSAMPLE;  // 1280
-      const ctx = canvas.getContext('2d');
+      const ctx = canvas.getContext('2d', { willReadFrequently: true });
       if (!ctx) return;
       ctx.setTransform(1,0,0,1,0,0);
       ctx.scale(SUPERSAMPLE, SUPERSAMPLE);      // draw in LOGICAL (640x360) space
@@ -159,11 +165,11 @@ export const Canvas = forwardRef<HTMLCanvasElement, CanvasProps>(({
       return [r, g, b, 255];
     };
 
-  const drawLine = (from: { x: number; y: number }, to: { x: number; y: number }, pressure: number) => {
+  const drawLine = (from: { x: number; y: number }, to: { x: number; y: number }, pressure: number, control?: { x: number; y: number }) => {
       const canvas = canvasRef.current;
       if (!canvas || disabled) return;
 
-      const ctx = canvas.getContext('2d');
+      const ctx = canvas.getContext('2d', { willReadFrequently: true });
       if (!ctx) return;
       // Resolve preset params with sensible defaults
   const baseOpacity = Math.max(0, Math.min(1, brushPreset?.opacity ?? 1));
@@ -192,25 +198,26 @@ export const Canvas = forwardRef<HTMLCanvasElement, CanvasProps>(({
   // El tamaño del preset solo sirve como valor inicial cuando se selecciona (SidePanels ya hace setBrushSize(p.size)).
   const baseSize = brushSize; // antes: brushPreset?.size || brushSize (causaba que el slider no tuviera efecto cuando había preset)
   const dist = Math.hypot(to.x - from.x, to.y - from.y);
-  const speed = dist; // px por frame event
-  const simulatedPressure = pressure && pressure > 0 ? pressure : Math.max(0.15, Math.min(1, 1 - speed / 40));
-    // Taper aplicado según progreso de stroke (solo reducción final clásica)
+  // Hard cap on substeps so a single fast/long segment can't explode into thousands of
+  // dabs (perf + keeps dab density bounded regardless of stroke speed).
+  const MAX_STEPS = 96;
+  // `pressure` is ALREADY the smoothed, device-independent dynamic computed in
+  // handlePointerMove (or a tap value). Velocity comes from the shared EMA ref (px/ms).
+  const v = emaSpeedRef.current;
+  const simulatedPressure = Math.max(0.12, Math.min(1, pressure > 0 ? pressure : 1));
   const progress = strokeProgressRef.current;
-  const classicTaper = 1 - taper * Math.min(1, progress / (180 + baseSize * 14));
-  // Nueva lógica dual‑taper: rampa inicial controlada + heurística final.
-  // Start ramp: sube de 0.15 a 1 en taperStartLen px (si activado)
-  const startRamp = taperStartEnabled ? (0.15 + 0.85 * Math.min(1, progress / taperStartLen)) : 1;
-  const startFactor = 1 - (1 - startRamp) * taperStartFactorCfg; // aplicar fuerza configurada
-  // End ramp heurística: si desacelera (speed bajo) y llevamos suficiente distancia, reducir.
+  // Gentler length-based falloff (before: any long stroke lost up to `taper` of its width).
+  const classicTaper = 1 - taper * 0.5 * Math.min(1, progress / (260 + baseSize * 16));
+  const startRamp = taperStartEnabled ? (0.2 + 0.8 * Math.min(1, progress / taperStartLen)) : 1;
+  const startFactor = 1 - (1 - startRamp) * taperStartFactorCfg;
+  // End taper fires only near a GENUINE slow-down (velocity in px/ms), so steady drawing
+  // keeps a consistent width instead of thinning everywhere.
   let endFactor = 1;
   if (taperEndEnabled && progress > taperEndLen) {
-    const slow = Math.min(1, Math.max(0, (34 - speed) / 34)); // 0 rápido .. 1 muy lento
-    // Cuando lento => reducir hacia 0.15, escalado por taperEndFactorCfg
-    const target = 0.15 + (1 - slow * taperEndFactorCfg) * 0.85; // entre 0.15 y ~1
-    endFactor = Math.max(0.15, Math.min(1, target));
+    const slow = Math.min(1, Math.max(0, (0.14 - v) / 0.14)); // 0 moving .. 1 near still
+    endFactor = Math.max(0.15, 1 - slow * 0.85 * taperEndFactorCfg);
   }
   const dualTaper = Math.min(startFactor, endFactor);
-  // Usamos el mínimo entre classic (falloff progresivo) y dual para preservar afinamiento global.
   const taperFactor = Math.min(classicTaper, dualTaper);
 
       // Helper para jitter mínimo orgánico
@@ -223,7 +230,7 @@ export const Canvas = forwardRef<HTMLCanvasElement, CanvasProps>(({
       };
   if (engine === 'pencil') {
         // Lápiz: múltiples micro trazos puntuales dentro de un óvalo con textura aleatoria
-        const steps = Math.max(1, Math.floor(dist / Math.max(1, baseSize * 0.35)));
+        const steps = Math.min(MAX_STEPS, Math.max(1, Math.floor(dist / Math.max(1, baseSize * 0.35))));
         const dirX = (to.x - from.x) / steps;
         const dirY = (to.y - from.y) / steps;
         const grainCountBase = 4 + Math.floor(baseSize * 0.6);
@@ -253,7 +260,7 @@ export const Canvas = forwardRef<HTMLCanvasElement, CanvasProps>(({
       else if (engine === 'acrylic') {
         // Enhanced acrylic: simulate multiple bristles leaving semi‑opaque paint with subtle grooves.
         const segLen = dist || 1;
-        const steps = Math.max(1, Math.floor(segLen / Math.max(1, baseSize * 0.6)));
+        const steps = Math.min(MAX_STEPS, Math.max(1, Math.floor(segLen / Math.max(1, baseSize * 0.6))));
         const dirX = (to.x - from.x) / steps;
         const dirY = (to.y - from.y) / steps;
         const dirLen = Math.hypot(to.x - from.x, to.y - from.y) || 1;
@@ -332,7 +339,7 @@ export const Canvas = forwardRef<HTMLCanvasElement, CanvasProps>(({
   // Charcoal texture: treat for charcoal preset regardless of engine (supports legacy pencil)
   if (brushPreset?.texture === 'charcoal') {
         // Carbón: múltiples manchas/granos con opacidad variable, halo suave y acumulación rápida
-        const steps = Math.max(1, Math.floor(dist / Math.max(1, baseSize * 0.45)));
+        const steps = Math.min(MAX_STEPS, Math.max(1, Math.floor(dist / Math.max(1, baseSize * 0.45))));
         const dirX = (to.x - from.x) / steps;
         const dirY = (to.y - from.y) / steps;
         const grainCountBase = 10 + Math.floor(baseSize * 1.1);
@@ -395,7 +402,7 @@ export const Canvas = forwardRef<HTMLCanvasElement, CanvasProps>(({
         return;
       } else if (engine === 'airbrush') {
         const segLen = dist || 1;
-        const steps = Math.max(1, Math.floor(segLen / spacing));
+        const steps = Math.min(MAX_STEPS, Math.max(1, Math.floor(segLen / spacing)));
         for (let i = 0; i <= steps; i++) {
           const t = i / steps;
           const cx = from.x + (to.x - from.x) * t + (Math.random() - 0.5) * scatter * 0.3;
@@ -417,12 +424,20 @@ export const Canvas = forwardRef<HTMLCanvasElement, CanvasProps>(({
       } else if (engine === 'wash') {
         // Watercolor wash: simulate semi-transparent blooms, diffusion & edge darkening.
         const segLen = dist || 1;
-        const steps = Math.max(1, Math.floor(segLen / (spacing * 0.6)));
+        const steps = Math.min(MAX_STEPS, Math.max(1, Math.floor(segLen / (spacing * 0.6))));
         const diffusion = Math.max(0, Math.min(1, brushPreset?.diffusion ?? 0.6));
         const bleed = Math.max(0, Math.min(1, brushPreset?.bleed ?? 0.5));
         const granulation = Math.max(0, Math.min(1, brushPreset?.granulation ?? 0.35));
         const edgeDarken = Math.max(0, Math.min(1, brushPreset?.edgeDarken ?? 0.65));
         const wetness = Math.max(0, Math.min(1, brushPreset?.wetness ?? 0.75));
+        // Pre-darkened pigment for the outer ring — the signature watercolor edge pooling.
+        const edgeCol = (() => {
+          const m = /^#([0-9a-f]{6})$/i.exec(activeColor);
+          if (!m) return activeColor;
+          const n = parseInt(m[1]!, 16);
+          const f = 1 - 0.45 * edgeDarken;
+          return `rgb(${Math.round(((n >> 16) & 255) * f)},${Math.round(((n >> 8) & 255) * f)},${Math.round((n & 255) * f)})`;
+        })();
         for (let i = 0; i <= steps; i++) {
           const t = i / steps;
           const cx = from.x + (to.x - from.x) * t;
@@ -437,11 +452,11 @@ export const Canvas = forwardRef<HTMLCanvasElement, CanvasProps>(({
             const alpha = opacityMul * wetness * (0.28 + 0.5 * fade) * (0.6 + Math.random() * 0.4);
             ctx.globalAlpha = alpha;
             const grad = ctx.createRadialGradient(cx, cy, 0, cx, cy, lr);
-            // Inner lighter pigment -> outer slightly darker edge pooling
+            // Inner lighter pigment -> outer darker edge pooling (real rim, not same hue).
             grad.addColorStop(0, activeColor);
             const edgeAlpha = Math.min(1, alpha * (0.4 + 0.9 * edgeDarken));
-            // Darker ring via rgba using same hue but higher alpha (browser composites)
-            grad.addColorStop(0.9, activeColor);
+            grad.addColorStop(0.72, activeColor);
+            grad.addColorStop(0.94, edgeCol);
             grad.addColorStop(1, 'rgba(0,0,0,0)');
             ctx.fillStyle = grad;
             ctx.beginPath();
@@ -450,7 +465,7 @@ export const Canvas = forwardRef<HTMLCanvasElement, CanvasProps>(({
             // Edge darken stroke subtle
             if (edgeDarken > 0.05) {
               ctx.globalAlpha = edgeAlpha * 0.6;
-              ctx.strokeStyle = activeColor;
+              ctx.strokeStyle = edgeCol;
               ctx.lineWidth = Math.max(0.5, lr * 0.07 * edgeDarken);
               ctx.beginPath();
               ctx.arc(cx, cy, lr * (0.92 + 0.05 * Math.random()), 0, Math.PI * 2);
@@ -488,7 +503,7 @@ export const Canvas = forwardRef<HTMLCanvasElement, CanvasProps>(({
         return;
       } else if (engine === 'spray') {
         const segLen = dist || 1;
-        const steps = Math.max(1, Math.floor(segLen / spacing));
+        const steps = Math.min(MAX_STEPS, Math.max(1, Math.floor(segLen / spacing)));
         const [pMin, pMax] = brushPreset?.particleSize || [1, 3];
         const densityMul = brushPreset?.density ?? 1;
         const basePresetSize = brushPreset?.size || baseSize;
@@ -543,7 +558,7 @@ export const Canvas = forwardRef<HTMLCanvasElement, CanvasProps>(({
         strokeProgressRef.current += dist;
         return;
       } else if (engine === 'smudge') {
-        const steps = Math.max(1, Math.floor(dist / spacing));
+        const steps = Math.min(MAX_STEPS, Math.max(1, Math.floor(dist / spacing)));
         for (let i = 0; i <= steps; i++) {
           const t = i / steps;
           const x = from.x + (to.x - from.x) * t;
@@ -563,9 +578,14 @@ export const Canvas = forwardRef<HTMLCanvasElement, CanvasProps>(({
               const cr = Math.round(sr * smudgeStrength + r * (1 - smudgeStrength));
               const cg = Math.round(sg * smudgeStrength + g * (1 - smudgeStrength));
               const cb = Math.round(sb * smudgeStrength + b * (1 - smudgeStrength));
-              ctx.globalAlpha = opacityMul * 0.9;
-              ctx.fillStyle = `rgb(${cr},${cg},${cb})`;
-              const rad = baseSize * 0.5;
+              // Soft, feathered dab so the picked color blends outward instead of stamping a hard disc.
+              const rad = baseSize * 0.55;
+              const gr = ctx.createRadialGradient(x, y, 0, x, y, rad);
+              gr.addColorStop(0, `rgb(${cr},${cg},${cb})`);
+              gr.addColorStop(0.55, `rgb(${cr},${cg},${cb})`);
+              gr.addColorStop(1, `rgba(${cr},${cg},${cb},0)`);
+              ctx.globalAlpha = opacityMul * 0.8;
+              ctx.fillStyle = gr;
               ctx.beginPath();
               ctx.arc(x, y, rad, 0, Math.PI * 2);
               ctx.fill();
@@ -577,7 +597,7 @@ export const Canvas = forwardRef<HTMLCanvasElement, CanvasProps>(({
         return;
       } else if (engine === 'calligraphy') {
         const segLen = dist || 1;
-        const steps = Math.max(1, Math.floor(segLen / spacing));
+        const steps = Math.min(MAX_STEPS, Math.max(1, Math.floor(segLen / spacing)));
         const baseAngle = (angleDeg * Math.PI) / 180;
         for (let i = 0; i <= steps; i++) {
           const t = i / steps;
@@ -604,7 +624,7 @@ export const Canvas = forwardRef<HTMLCanvasElement, CanvasProps>(({
         const prev = ctx.globalCompositeOperation;
         if (blendMode === 'add') ctx.globalCompositeOperation = 'lighter';
         const segLen = dist || 1;
-        const steps = Math.max(1, Math.floor(segLen / spacing));
+        const steps = Math.min(MAX_STEPS, Math.max(1, Math.floor(segLen / spacing)));
         for (let i = 0; i <= steps; i++) {
           const t = i / steps;
           const cx = from.x + (to.x - from.x) * t;
@@ -619,13 +639,24 @@ export const Canvas = forwardRef<HTMLCanvasElement, CanvasProps>(({
           ctx.arc(cx, cy, r, 0, Math.PI * 2);
           ctx.fill();
         }
+        // Bright solid core so the glow reads as a defined light line, not just a haze.
+        ctx.globalAlpha = Math.min(1, opacityMul * 0.9);
+        ctx.strokeStyle = activeColor;
+        ctx.lineCap = 'round';
+        ctx.lineJoin = 'round';
+        ctx.lineWidth = Math.max(1, baseSize * (0.16 + 0.14 * simulatedPressure));
+        ctx.beginPath();
+        ctx.moveTo(from.x, from.y);
+        if (control) ctx.quadraticCurveTo(control.x, control.y, to.x, to.y);
+        else ctx.lineTo(to.x, to.y);
+        ctx.stroke();
         ctx.globalAlpha = 1;
         ctx.globalCompositeOperation = prev;
         strokeProgressRef.current += dist;
         return;
       } else if (engine === 'pixel') {
         const segLen = dist || 1;
-        const steps = Math.max(1, Math.floor(segLen / spacing));
+        const steps = Math.min(MAX_STEPS, Math.max(1, Math.floor(segLen / spacing)));
         const sizePx = Math.max(1, Math.round(baseSize * 0.4));
         for (let i = 0; i <= steps; i++) {
           const t = i / steps;
@@ -642,7 +673,7 @@ export const Canvas = forwardRef<HTMLCanvasElement, CanvasProps>(({
         return;
       } else if (engine === 'multi') {
         const segLen = dist || 1;
-        const steps = Math.max(1, Math.floor(segLen / spacing));
+        const steps = Math.min(MAX_STEPS, Math.max(1, Math.floor(segLen / spacing)));
         const stamps = brushPreset?.stamps || ['★'];
         for (let i = 0; i <= steps; i++) {
           const t = i / steps;
@@ -691,13 +722,19 @@ export const Canvas = forwardRef<HTMLCanvasElement, CanvasProps>(({
         const p1 = jitterPoint(to);
         ctx.globalAlpha = opacityMul;
         ctx.strokeStyle = activeColor;
-  const pressureScale = simulatedPressure * taperFactor;
+        const pressureScale = simulatedPressure * taperFactor;
         ctx.lineCap = 'round';
         ctx.lineJoin = 'round';
         ctx.lineWidth = Math.max(0.5, baseSize * 0.4 + baseSize * 0.6 * pressureScale);
         ctx.beginPath();
         ctx.moveTo(p0.x, p0.y);
-        ctx.lineTo(p1.x, p1.y);
+        if (control) {
+          // Quadratic through the buffer midpoints (control = the real sampled point) so the
+          // inked line is a genuine smooth curve, not a chain of straight chords.
+          ctx.quadraticCurveTo(control.x, control.y, p1.x, p1.y);
+        } else {
+          ctx.lineTo(p1.x, p1.y);
+        }
         ctx.stroke();
         strokeProgressRef.current += dist;
         ctx.globalAlpha = 1;
@@ -719,7 +756,7 @@ export const Canvas = forwardRef<HTMLCanvasElement, CanvasProps>(({
   const floodFill = (x: number, y: number) => {
       const canvas = canvasRef.current;
       if (!canvas) return;
-      const ctx = canvas.getContext('2d');
+      const ctx = canvas.getContext('2d', { willReadFrequently: true });
       if (!ctx) return;
   const w = canvas.width; // device px (fixed 720)
   const h = canvas.height; // fixed 1280
@@ -970,12 +1007,26 @@ export const Canvas = forwardRef<HTMLCanvasElement, CanvasProps>(({
       eraseRef.current = erase;
   // Reset smoothing buffer para no enlazar con stroke previo
   smoothBuffer.current = [{...pos, t: performance.now(), pressure: 0.5}];
-      firstMoveRef.current = true; // primera mov después de pointerDown se salta
+      firstMoveRef.current = true; // sigue solo como discriminador de "tap" (sin movimiento)
       strokeStartPosRef.current = pos;
+      // Reset device-independent dynamics + stabilizer for this stroke.
+      smoothedPosRef.current = pos;
+      emaSpeedRef.current = 0;
+      emaPressureRef.current = 0.6; // start moderately thick
+      lastMoveTimeRef.current = performance.now();
+      strokePeakSpeedRef.current = 0.001;
       setIsDrawing(!erase);
     };
 
     const endStroke = () => {
+      // Flush the final segment to the true up position so the ink reaches the finger
+      // (the stabilizer anchor lags a few px behind the raw pointer).
+      if (!firstMoveRef.current && !eraseRef.current && smoothedPosRef.current && lastPointRef.current) {
+        const s = smoothedPosRef.current, r = lastPointRef.current;
+        if (Math.hypot(r.x - s.x, r.y - s.y) > 0.5) {
+          drawLine(s, r, Math.max(0.12, Math.min(1, emaPressureRef.current)));
+        }
+      }
       // Si no hubo movimiento (tap) dibujamos un punto corto
       if (firstMoveRef.current && strokeStartPosRef.current && !eraseRef.current) {
         const p = strokeStartPosRef.current;
@@ -1182,7 +1233,7 @@ export const Canvas = forwardRef<HTMLCanvasElement, CanvasProps>(({
       if (restoredRef.current) return;
       if (!restoreImage) return;
       const canvas = canvasRef.current; if (!canvas) return;
-      const ctx = canvas.getContext('2d'); if (!ctx) return;
+      const ctx = canvas.getContext('2d', { willReadFrequently: true }); if (!ctx) return;
       const img = new Image();
       img.onload = () => {
         ctx.save();
@@ -1222,10 +1273,13 @@ export const Canvas = forwardRef<HTMLCanvasElement, CanvasProps>(({
         const native = e.nativeEvent as PointerEvent & { offsetX: number; offsetY: number };
         const pos = toLogicalPos(native.offsetX, native.offsetY);
         
+        // Real pressure ONLY from a stylus; touchscreens report a constant value that
+        // would freeze the velocity model, so treat mouse/touch as pressure-less here.
+        const isPen = e.pointerType === 'pen';
         const nativePressure = (e.nativeEvent as any).pressure as number | undefined;
-        const pressure = typeof nativePressure === 'number' ? nativePressure : 0;
+        const pressure = (isPen && typeof nativePressure === 'number' && nativePressure > 0) ? nativePressure : 0;
         if (penActionRef.current === 'erase') {
-          const ctx = canvasRef.current?.getContext('2d');
+          const ctx = canvasRef.current?.getContext('2d', { willReadFrequently: true });
           if (ctx) {
             // Preserve opaque white base by painting with white instead of punching transparency
             ctx.save();
@@ -1241,31 +1295,54 @@ export const Canvas = forwardRef<HTMLCanvasElement, CanvasProps>(({
             ctx.restore();
           }
         } else {
-          // Saltar la primera actualización para evitar segmento conectivo inmediato
-          if (firstMoveRef.current) {
-            firstMoveRef.current = false;
-            smoothBuffer.current.push({ ...pos, t: performance.now(), pressure });
-            if (smoothBuffer.current.length > 6) smoothBuffer.current.shift();
-            lastPointRef.current = pos; // solo actualizar referencia
-            return;
+          const last = lastPointRef.current!;
+          // Decimate sub-pixel jitter so a near-still finger doesn't fuzz the line.
+          const rawDist = Math.hypot(pos.x - last.x, pos.y - last.y);
+          if (rawDist < 0.5) { lastPointRef.current = pos; return; }
+          firstMoveRef.current = false; // a real move happened -> stroke, not a tap
+
+          // Device-independent smoothed velocity (logical px/ms).
+          const now = performance.now();
+          const dt = Math.min(64, Math.max(4, now - (lastMoveTimeRef.current || now)));
+          lastMoveTimeRef.current = now;
+          const inst = rawDist / dt;
+          emaSpeedRef.current += (inst - emaSpeedRef.current) * 0.35;
+          const vNow = emaSpeedRef.current;
+          strokePeakSpeedRef.current = Math.max(strokePeakSpeedRef.current * 0.98, vNow);
+
+          // Dynamic (drives width/opacity): stylus pressure, else velocity (slow->thick,
+          // fast->thin), smoothed so it doesn't flicker segment-to-segment.
+          let dyn: number;
+          if (pressure > 0) {
+            dyn = Math.pow(Math.min(1, pressure), 0.6);
+          } else {
+            const x = Math.min(1, vNow / 1.8); // VREF*2, VREF ~0.9 logical px/ms
+            const fast = x * x * (3 - 2 * x);  // smoothstep
+            dyn = 1 - 0.85 * fast;
           }
-          // Smoothing: añadimos al buffer y usamos el punto anterior suavizado
-          smoothBuffer.current.push({ ...pos, t: performance.now(), pressure });
+          emaPressureRef.current += (dyn - emaPressureRef.current) * 0.4;
+          const dynamic = Math.max(0.12, Math.min(1, emaPressureRef.current));
+
+          // Position stabilizer ("pulled string"): heavier at low speed to kill tremor.
+          const spPrev = smoothedPosRef.current || pos;
+          const alpha = Math.max(0.35, Math.min(0.9, 0.35 + 0.5 * Math.min(1, vNow / 0.5)));
+          const stab = { x: spPrev.x + (pos.x - spPrev.x) * alpha, y: spPrev.y + (pos.y - spPrev.y) * alpha };
+          smoothedPosRef.current = stab;
+
+          // Feed the STABILIZED point through Chaikin midpoint smoothing.
+          smoothBuffer.current.push({ x: stab.x, y: stab.y, t: now, pressure: dynamic });
           if (smoothBuffer.current.length > 6) smoothBuffer.current.shift();
           const pts = smoothBuffer.current;
-          let fromPt = lastPointRef.current;
-          let toPt = pos;
+          let fromPt: {x:number;y:number} = last;
+          let toPt: {x:number;y:number} = stab;
+          let ctrlPt: {x:number;y:number} | undefined;
           if (pts.length >= 3) {
-            // simple Chaikin midpoint smoothing
-            const a = pts[pts.length - 3];
-            const b = pts[pts.length - 2];
-            const c = pts[pts.length - 1];
-            const mid1 = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
-            const mid2 = { x: (b.x + c.x) / 2, y: (b.y + c.y) / 2 };
-            fromPt = mid1;
-            toPt = mid2;
+            const a = pts[pts.length - 3]!, b = pts[pts.length - 2]!, c = pts[pts.length - 1]!;
+            fromPt = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+            toPt = { x: (b.x + c.x) / 2, y: (b.y + c.y) / 2 };
+            ctrlPt = { x: b.x, y: b.y }; // real sample point = quadratic control between the two midpoints
           }
-          drawLine(fromPt, toPt, pressure);
+          drawLine(fromPt, toPt, dynamic, ctrlPt);
         }
         lastPointRef.current = pos;
       }

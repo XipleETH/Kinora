@@ -55,6 +55,7 @@ The canvas and UI were rebuilt to be genuinely usable on a phone:
 - **Vertical 9:16 canvas** that fills the phone screen (Reels/TikTok shape).
 - **Fixed canonical resolution (720×1280)** on every device, so a frame drawn on a phone and one drawn on a desktop are pixel‑compatible — the weekly GIF encoder now includes *every* frame instead of dropping mismatched ones.
 - **Collapsible tools** — a right‑side drawer holds the tool panels and auto‑closes when you pick a tool, leaving the whole screen for drawing. A compact bottom nav replaces the desktop side rail.
+- **Comfortable color picker** — an HSV **color wheel** replaces the poor native `<input type="color">` that Reddit's mobile app renders, so choosing palette colors works well on both phone and desktop.
 - Desktop keeps the full paper‑sketch UI with the tool panels hugging the canvas.
 
 ---
@@ -73,7 +74,15 @@ The canvas and UI were rebuilt to be genuinely usable on a phone:
 
 ## Custom brush engine
 
-A hand‑written HTML‑canvas brush engine (no external art lib): ink/manga pen with dual‑taper, acrylic with simulated bristles, watercolor wash with diffusion/bleed/granulation, airbrush, spray, splatter, smudge, calligraphy, glow, pixel, and multi‑stamp brushes. Weekly constraints cap which brushes are available to keep a cohesive style.
+A hand‑written HTML‑canvas brush engine — no external art library. It draws in a fixed **logical coordinate space** so a brush feels identical on every device, and every stroke is:
+
+- **Velocity‑driven** — on both finger and mouse, stroke width and opacity respond to speed (draw slow → thick and bold, flick fast → thin), simulating pressure even on touchscreens that report none.
+- **Stabilized** — a "pulled‑string" position filter damps hand tremor (stronger at low speed) and sub‑pixel jitter is decimated, so lines come out clean.
+- **Smoothed** — points are run through Chaikin midpoints and drawn as **quadratic curves**, not straight chords.
+
+On top of that shared engine sit 12 brush characters: ink/manga pen (dual‑taper), marker, pencil, charcoal, **watercolor wash** (diffusion, granulation, and a darker pooled edge rim), acrylic with simulated bristles + impasto, airbrush, spray (with graffiti drip), splatter, **smudge** that drags the underlying color, calligraphy nib, **glow** with an additive halo and a bright solid core, pixel, and multi‑stamp. Weekly constraints cap which brushes are available to keep a cohesive style.
+
+When building a weekly bundle, voters see a **live sample stroke** rendered for every brush (not just its name), so the kit choice is informed.
 
 ---
 
@@ -119,7 +128,7 @@ src/
 
 ## Status
 
-Concept‑complete and installed live on r/Kinora. Recent updates for the hackathon: native Reddit Media API storage, automatic frame + weekly‑GIF posts, mobile finger‑drawing with a vertical fixed‑resolution canvas, community voting with house‑preset fallback, and a paper‑sketch UI polished for both mobile and desktop.
+Concept‑complete and installed live on r/Kinora. Recent updates for the hackathon: an **upgraded brush engine** (velocity dynamics + tremor stabilizer on finger and mouse, quadratic smoothing, and per‑brush polish — watercolor rim, glow core, smudge color‑drag), a **color‑wheel palette picker**, **live brush previews** in the voting wizard, native Reddit Media API storage, automatic frame + weekly‑GIF posts, mobile finger‑drawing with a vertical fixed‑resolution canvas, community voting with house‑preset fallback, and a paper‑sketch UI polished for both mobile and desktop.
 
 ---
 

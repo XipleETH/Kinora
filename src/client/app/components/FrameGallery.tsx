@@ -1,6 +1,5 @@
 import React, { useMemo, useState, useCallback, useEffect } from 'react';
 import { Frame } from '../App';
-import { allBrushPresets } from '../brushes';
 import { User, Calendar, ArrowBigUp, ArrowBigDown } from 'lucide-react';
 
 interface FrameGalleryProps {
@@ -9,9 +8,10 @@ interface FrameGalleryProps {
   initialVotes?: Record<string, { up: number; down: number; my: -1|0|1 }>;
   activeBrushIds?: string[]; // Weekly active brushes (winners)
   showModeration?: boolean;  // Force show moderation panel (override auto-detect)
+  currentWeek?: number;      // so the current week's group shows even with 0 frames
 }
 
-export const FrameGallery: React.FC<FrameGalleryProps> = ({ frames, pendingFrame, initialVotes, activeBrushIds, showModeration }) => {
+export const FrameGallery: React.FC<FrameGalleryProps> = ({ frames, pendingFrame, initialVotes, activeBrushIds, showModeration, currentWeek }) => {
   const [openWeeks, setOpenWeeks] = useState<Record<number, boolean>>({});
   const [votes, setVotes] = useState<Record<string, { up: number; down: number; my: -1|0|1 }>>({});
   const [isMod, setIsMod] = useState(false);
@@ -107,7 +107,7 @@ export const FrameGallery: React.FC<FrameGalleryProps> = ({ frames, pendingFrame
     }
   }
 
-  if (frames.length === 0 && !showPending) return (
+  if (frames.length === 0 && !showPending && !currentWeek) return (
     <div className="text-center py-16">
       <div className="bg-white/10 backdrop-blur-sm rounded-2xl p-12 border border-white/20 max-w-md mx-auto">
         <h3 className="text-2xl font-bold text-white mb-4">No frames yet</h3>
@@ -125,133 +125,52 @@ export const FrameGallery: React.FC<FrameGalleryProps> = ({ frames, pendingFrame
       arr.push(f);
       map.set(f.paletteWeek, arr);
     }
+    // Always show the current week's group (even with no frames yet) so the week's
+    // gallery appears the moment the week changes — not only after the first frame.
+    if (currentWeek && !map.has(currentWeek)) map.set(currentWeek, []);
     return Array.from(map.entries()).sort((a,b)=>a[0]-b[0]);
-  }, [frames]);
+  }, [frames, currentWeek]);
 
-  // Extract distinct week numbers
-  const weekNumbers = useMemo(()=> Array.from(new Set(frames.map(f=>f.paletteWeek))).sort((a,b)=>a-b), [frames]);
+  // Extract distinct week numbers (including the current week)
+  const weekNumbers = useMemo(()=> {
+    const s = new Set(frames.map(f=>f.paletteWeek));
+    if (currentWeek) s.add(currentWeek);
+    return Array.from(s).sort((a,b)=>a-b);
+  }, [frames, currentWeek]);
 
+  // Fetch each week's AUTHORITATIVE bundle (theme/palette/brushes/director) from the
+  // server so every past week shows the config it was actually drawn with — not the
+  // current week's palette (which was the bug that changed old weeks' colors).
   useEffect(()=>{
     let cancel = false;
     (async ()=>{
       if (!weekNumbers.length) return;
       setFetchingDirectors(true);
-
-      // Fetch the server-authoritative config for the current week
-      try {
-        const cfgRes = await fetch('/api/draw-config');
-        if (cfgRes.ok) {
-          const cfg = await cfgRes.json();
-          if (cfg.ok && typeof cfg.currentWeek === 'number') {
-            const cw = cfg.currentWeek;
-            const serverBundle: { theme: string; palette: string[]; brushes: string[]; director?: string } = {
-              theme: cfg.theme || (cw === 1 ? 'Moving Lines' : ''),
-              palette: Array.isArray(cfg.paletteColors) ? cfg.paletteColors.slice(0, 6) : [],
-              brushes: Array.isArray(cfg.brushes) ? cfg.brushes.map((b: any) => typeof b === 'object' ? (b.name || b.id) : String(b)).slice(0, 4) : [],
-              director: cfg.director || undefined,
-            };
-            if (!cancel) {
-              setWeekBundles(prev => ({ ...prev, [cw]: serverBundle }));
-              if (serverBundle.director) {
-                setWeekDirectors(prev => ({ ...prev, [cw]: serverBundle.director! }));
-              }
-            }
-          }
-        }
-      } catch {/* ignore */}
-
-      // Seed from localStorage only for NON-current weeks (historical)
-      const seededDirectors: Record<number,string> = {};
-      const seededBundles: Record<number,{ theme:string; palette:string[]; brushes:string[]; director?:string }> = {};
-      for (const w of weekNumbers) {
-        try {
-          const wd = localStorage.getItem('weekWinner_'+w);
-          if (wd) seededDirectors[w] = wd;
-          const wb = localStorage.getItem('weekBundle_'+w);
-          if (wb) {
-            const parsed = JSON.parse(wb);
-            if (parsed && parsed.theme) {
-              seededBundles[w] = {
-                theme: parsed.theme,
-                palette: Array.isArray(parsed.palette)? parsed.palette.slice(0,6):[],
-                brushes: Array.isArray(parsed.brushes)? parsed.brushes.slice(0,4):[],
-                director: parsed.director
-              };
-              if (!seededDirectors[w] && parsed.director) seededDirectors[w] = parsed.director;
-            }
-          }
-        } catch {/* ignore */}
-      }
-      if (Object.keys(seededDirectors).length) setWeekDirectors(prev=>({ ...seededDirectors, ...prev }));
-      if (Object.keys(seededBundles).length) setWeekBundles(prev=>({ ...seededBundles, ...prev }));
       try {
         const results = await Promise.all(weekNumbers.map(async w => {
           try {
-            const r = await fetch(`/api/proposals?week=${w}`);
-            if (!r.ok) return { week: w, proposals: [] as any[] };
+            const r = await fetch(`/api/week-bundle?week=${w}`);
+            if (!r.ok) return null;
             const j = await r.json();
-            return { week: w, proposals: j.proposals || [] };
-          } catch { return { week: w, proposals: [] as any[] }; }
+            return { week: w, bundle: j };
+          } catch { return null; }
         }));
-        const directorUpdates: Record<number,string> = {};
-        const bundleUpdates: Record<number,{ theme:string; palette:string[]; brushes:string[]; director?:string }> = {};
-        for (const { week, proposals } of results) {
-          if (!proposals.length) continue;
-          interface P { id:string; type:string; title:string; data:any; votes:number; proposedBy:string; }
-          const byGroup: Record<string, { theme?:P; palette?:P; brushes?:P; total:number }> = {};
-          const themes: P[] = [];
-          for (const p of proposals as P[]) {
-            const gid = p.data?.groupId;
-            if (gid) {
-              if (!byGroup[gid]) byGroup[gid] = { total:0 };
-              if (p.type === 'theme') byGroup[gid].theme = p;
-              else if (p.type === 'palette') byGroup[gid].palette = p;
-              else if (p.type === 'brushKit') byGroup[gid].brushes = p;
-            }
-            if (p.type === 'theme') themes.push(p);
-          }
-          let winner: string | undefined;
-          let best = -1;
-            let bestGroup: { theme?:P; palette?:P; brushes?:P; total:number } | undefined;
-          for (const g of Object.values(byGroup)) {
-            if (g.theme && g.palette && g.brushes) {
-              const total = (g.theme.votes||0)+(g.palette.votes||0)+(g.brushes.votes||0);
-              if (total > best) { best = total; bestGroup = g; winner = g.theme.proposedBy || g.palette.proposedBy || g.brushes.proposedBy; }
-            }
-          }
-          if (!winner && themes.length) {
-            themes.sort((a,b)=> (b.votes||0) - (a.votes||0));
-            winner = themes[0].proposedBy;
-          }
-          // Proposals from week N determine week N+1's tools
-          const targetWeek = week + 1;
-          if (winner) {
-            directorUpdates[targetWeek] = winner;
-            try { localStorage.setItem('weekWinner_'+targetWeek, winner); } catch {}
-          }
-          if (bestGroup && bestGroup.theme && bestGroup.palette && bestGroup.brushes) {
-            const paletteColors: string[] = (Array.isArray(bestGroup.palette.data)? bestGroup.palette.data : bestGroup.palette.data?.colors) || [];
-            const brushNames: string[] = bestGroup.brushes.data?.names || [];
-            const bundlePayload = {
-              theme: bestGroup.theme.title,
-              director: winner,
-              palette: paletteColors.slice(0,6),
-              brushes: brushNames.slice(0,4),
-              updatedAt: Date.now()
-            };
-            bundleUpdates[targetWeek] = {
-              theme: bundlePayload.theme,
-              palette: bundlePayload.palette,
-              brushes: bundlePayload.brushes,
-              director: winner
-            };
-            try { localStorage.setItem('weekBundle_'+targetWeek, JSON.stringify(bundlePayload)); } catch {}
-          }
+        if (cancel) return;
+        const bundles: Record<number,{ theme:string; palette:string[]; brushes:string[]; director?:string }> = {};
+        const directors: Record<number,string> = {};
+        for (const res of results) {
+          if (!res || !res.bundle) continue;
+          const b = res.bundle;
+          bundles[res.week] = {
+            theme: b.theme || '',
+            palette: Array.isArray(b.palette) ? b.palette.slice(0,6) : [],
+            brushes: Array.isArray(b.brushes) ? b.brushes.slice(0,4) : [],
+            director: b.director || undefined,
+          };
+          if (b.director) directors[res.week] = b.director;
         }
-        if (!cancel) {
-          if (Object.keys(directorUpdates).length) setWeekDirectors(prev=>({ ...prev, ...directorUpdates }));
-          if (Object.keys(bundleUpdates).length) setWeekBundles(prev=>({ ...prev, ...bundleUpdates }));
-        }
+        if (Object.keys(bundles).length) setWeekBundles(prev=>({ ...prev, ...bundles }));
+        if (Object.keys(directors).length) setWeekDirectors(prev=>({ ...prev, ...directors }));
       } finally { if (!cancel) setFetchingDirectors(false); }
     })();
     return ()=>{ cancel = true; };
@@ -333,23 +252,16 @@ export const FrameGallery: React.FC<FrameGalleryProps> = ({ frames, pendingFrame
   {/* Week meta helpers (palette/theme/brushes). Keep in sync with App weekly palettes. */}
   {grouped.map(([week, list])=>{
           const sorted = [...list].sort((a,b)=>a.timestamp-b.timestamp);
-          // Fallback arrays if no dynamic bundle is available yet
-          const fallbackPalettes: string[][] = [
-            ['#FF6B6B', '#4ECDC4', '#45B7D1', '#96CEB4', '#FFEAA7', '#DDA0DD'],
-            ['#E17055', '#FDCB6E', '#6C5CE7', '#A29BFE', '#FD79A8', '#E84393'],
-            ['#00CEC9', '#55A3FF', '#FDCB6E', '#E17055', '#A29BFE', '#FD79A8']
-          ];
-          const fallbackThemes = ['Anime Inking', 'Retro Comic', 'Soft Watercolor'];
+          // Until this week's real bundle has loaded from the server, show NEUTRAL
+          // placeholder stripes (not a guessed palette) so wrong colors never flash
+          // before the correct ones.
           const bundle = weekBundles[week];
-          const palette = bundle?.palette && bundle.palette.length>=3 ? bundle.palette : (fallbackPalettes[week % fallbackPalettes.length] || fallbackPalettes[0]);
-          const theme = bundle?.theme || (week === 1 ? 'Moving Lines' : (fallbackThemes[week % fallbackThemes.length] || fallbackThemes[0]));
-          // Map active brush ids to display names (for fallback). When bundle has brush names, prefer them.
-          const activeIds = (activeBrushIds && activeBrushIds.length ? activeBrushIds : ['ink','acrylic-paint','watercolor-wash','airbrush']).slice(0,4);
-          const activeBrushNames = activeIds
-            .map(id => allBrushPresets.find(p => p.id === id)?.name || id)
-            .join(', ');
-          const director = weekDirectors[week] || (week === 1 ? 'kinora-app' : undefined);
-          const brushLine = bundle?.brushes && bundle.brushes.length ? bundle.brushes.join(', ') : activeBrushNames;
+          const loaded = !!(bundle && Array.isArray(bundle.palette) && bundle.palette.length >= 3);
+          const NEUTRAL_STRIPES = ['#e7e0cf','#ded7c4','#e7e0cf','#ded7c4','#e7e0cf','#ded7c4'];
+          const palette = loaded ? bundle!.palette : NEUTRAL_STRIPES;
+          const theme = loaded ? (bundle!.theme || (week === 1 ? 'Moving Lines' : '')) : '';
+          const director = loaded ? (bundle!.director || undefined) : undefined;
+          const brushLine = (loaded && bundle!.brushes && bundle!.brushes.length) ? bundle!.brushes.join(', ') : '';
           return (
             <div key={week} className="max-w-[1580px] mx-auto px-2">
               <div className="clapper">
@@ -380,7 +292,9 @@ export const FrameGallery: React.FC<FrameGalleryProps> = ({ frames, pendingFrame
                 </div>
                 <div className={`clapper-body ${openWeeks[week] ? '' : 'closed'}`}> 
                   <div className="clapper-grid">
-                    {[...sorted].reverse().map((frame)=>{
+                    {sorted.length === 0 ? (
+                      <div style={{gridColumn:'1 / -1', textAlign:'center', padding:'18px 8px', fontSize:12, opacity:0.6}}>No frames yet this week — be the first to draw!</div>
+                    ) : [...sorted].reverse().map((frame)=>{
                       const index = frames.indexOf(frame);
                       const key = (frame as any).key || frame.id;
                       const preferredSrc = (frame as any).src || frame.imageData || hydrated[key];

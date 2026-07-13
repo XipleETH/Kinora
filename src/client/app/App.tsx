@@ -872,6 +872,7 @@ function App() {
         {currentView === 'gallery' && (
           <FrameGallery
             frames={frames}
+            currentWeek={currentWeek}
             pendingFrame={(pendingFrameDataUrl || sharedPending) ? { imageData: pendingFrameDataUrl || sharedPending!.imageData, startedAt: sessionStartTs || sharedPending?.timestamp || Date.now() } : null}
           />
         )}

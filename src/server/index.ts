@@ -358,27 +358,9 @@ async function ensureWeeklyShowcasePost(callerPostId?: string): Promise<string |
     await redis.set(SHOWCASE_WEEKLY_KEY('', currentWeek), post.id);
     console.log('[showcase] weekly post created:', post.id, 'for week', currentWeek);
 
-    // Schedule the weekly animation GIF for the PREVIOUS week
-    if (currentWeek > 1) {
-      const animKey = `animation:scheduled:w${currentWeek - 1}`;
-      const alreadyScheduled = await redis.get(animKey);
-      if (!alreadyScheduled) {
-        try {
-          // Publish the previous week's animation GIF shortly after the new week starts
-          // (a couple of minutes, not hours) so it lands right at week end.
-          const animDelayMs = 2 * 60 * 1000; // 2 minutes
-          await scheduler.runJob({
-            name: 'weekly-animation',
-            data: { postId: callerPostId || context.postId, week: currentWeek - 1 },
-            runAt: new Date(Date.now() + animDelayMs),
-          });
-          await redis.set(animKey, 'scheduled');
-          console.log('[showcase] scheduled weekly-animation for week', currentWeek - 1);
-        } catch (e: any) {
-          console.error('[showcase] failed to schedule animation:', e?.message);
-        }
-      }
-    }
+    // NOTE: the previous week's animation GIF is scheduled by the cron handler via
+    // schedulePreviousWeekAnimation() — NOT here — so it still runs when this weekly
+    // post already exists (this function returns early on the dedup path above).
 
     return post.id;
   } catch (e: any) {
@@ -1144,6 +1126,9 @@ router.post('/api/finalize-turn', async (_req, res) => {
         const frameKeys: string[] = frameKeysStr ? JSON.parse(frameKeysStr) : [];
         frameKeys.push(key);
         await redis.set(`frames:list:${postId}`, JSON.stringify(frameKeys));
+        // Keep the canvas post id current so the weekly animation cron always finds
+        // the frames on the post they were actually saved to.
+        try { await redis.set('kinora:main_post_id', postId); } catch {}
         console.log('[finalize-turn] frame stored:', key, 'storage:', stored.storage);
 
         // --- Auto-post to weekly showcase (daily editable comment) ---
@@ -2380,6 +2365,48 @@ app.get('/api/debug/proposals', async (req, res) => {
   } catch(e:any){ res.status(500).json({ ok:false, error:e?.message }); }
 });
 
+// Per-week bundle (theme/palette/brushes/director) for ANY week — used by the gallery
+// so each past week shows the colors it was actually drawn with (not the current week's).
+app.get('/api/week-bundle', async (req, res) => {
+  try {
+    const { postId } = context;
+    const week = req.query.week ? parseInt(String(req.query.week), 10) : await ensureCurrentWeek();
+    if (!week || week < 1) return res.json({ week, theme: '', palette: [], brushes: [], director: '' });
+    // 1. Authoritative stored meta (written when that week's showcase post was created).
+    const metaRaw = await redis.get(SHOWCASE_WEEK_META_KEY(week));
+    if (metaRaw) {
+      try {
+        const m = JSON.parse(metaRaw);
+        if (m && (m.theme || (Array.isArray(m.paletteColors) && m.paletteColors.length))) {
+          return res.json({
+            week,
+            theme: m.theme || '',
+            palette: Array.isArray(m.paletteColors) ? m.paletteColors.slice(0, 6) : [],
+            brushes: Array.isArray(m.brushNames) ? m.brushNames.slice(0, 4) : [],
+            director: m.directorName || '',
+          });
+        }
+      } catch {}
+    }
+    // 2. Compute (never-empty): week 1 = house bundle; later weeks = previous week's winners.
+    if (week === 1) {
+      const hb = getHouseBundle(1);
+      return res.json({ week, theme: hb.theme.name, palette: hb.palette.colors, brushes: hb.brushKit.names, director: hb.director });
+    }
+    let winners: any = postId ? await materializePreviousWeekWinners(postId, week) : null;
+    if (!winners) winners = houseWinnersForWeek(week - 1);
+    res.json({
+      week,
+      theme: winners.theme?.data?.value || winners.theme?.title || '',
+      palette: Array.isArray(winners.palette?.data?.colors) ? winners.palette.data.colors.slice(0, 6) : [],
+      brushes: Array.isArray(winners.brushKit?.data?.names) ? winners.brushKit.data.names.slice(0, 4) : [],
+      director: winners.theme?.proposedBy || '',
+    });
+  } catch (e: any) {
+    res.status(500).json({ error: e?.message });
+  }
+});
+
 // Unified draw configuration: winners + palette + brushes + theme + current week
 app.get('/api/draw-config', async (req, res) => {
   try {
@@ -2649,6 +2676,30 @@ async function fetchFramePixels(postId: string, frameKey: string): Promise<{ wid
   return null;
 }
 
+// Schedule the previous week's animation GIF. Called from the weekly cron so it runs
+// independently of whether the weekly showcase post already exists (ensureWeeklyShowcasePost
+// returns early on its dedup path). Frames live on the main canvas post (kinora:main_post_id).
+// Guarded by a per-week key so it is never scheduled twice.
+async function schedulePreviousWeekAnimation(currentWeek: number): Promise<void> {
+  if (currentWeek <= 1) return;
+  const targetWeek = currentWeek - 1;
+  const animKey = `animation:scheduled:w${targetWeek}`;
+  if (await redis.get(animKey)) return; // already scheduled or completed
+  const canvasPostId = (await redis.get('kinora:main_post_id')) || context.postId || '';
+  if (!canvasPostId) { console.warn('[animation] no canvas postId — cannot schedule week', targetWeek); return; }
+  try {
+    await scheduler.runJob({
+      name: 'weekly-animation',
+      data: { postId: canvasPostId, week: targetWeek },
+      runAt: new Date(Date.now() + 2 * 60 * 1000), // ~2 min after week start
+    });
+    await redis.set(animKey, 'scheduled');
+    console.log('[animation] scheduled weekly-animation for week', targetWeek, 'postId', canvasPostId);
+  } catch (e: any) {
+    console.error('[animation] failed to schedule week', targetWeek, ':', e?.message);
+  }
+}
+
 // --- Weekly Showcase Post cron (cron "5 0 * * 1" => Monday 00:05 UTC = Sunday 7:05 PM Colombia) ---
 // The week COUNTER rolls over at Monday 00:00 UTC (= Sunday 7:00 PM Colombia), so this cron fires
 // 5 minutes AFTER the reset, when ensureCurrentWeek() already reports the new week. Ballot seeding is
@@ -2658,6 +2709,9 @@ app.post('/internal/cron/weekly-showcase-post', async (_req, res) => {
     console.log('[cron:weekly-showcase] triggered');
     const currentWeek = await ensureCurrentWeek();
     const postId = await ensureWeeklyShowcasePost();
+    // Schedule the previous week's GIF regardless of whether the showcase post was
+    // newly created or already existed (the bug that skipped the GIF last week).
+    await schedulePreviousWeekAnimation(currentWeek);
     if (postId) {
       console.log('[cron:weekly-showcase] week', currentWeek, 'post:', postId);
       res.json({ ok: true, week: currentWeek, postId });
@@ -2835,14 +2889,40 @@ app.post('/api/debug/generate-animation', async (req, res) => {
   try {
     const { postId } = context;
     const week = req.body?.week;
+    const force = req.body?.force === true;
     if (!postId || !week) return res.status(400).json({ ok: false, reason: 'postId and week required' });
+
+    if (force) {
+      // Clear the dedup so a fresh GIF is generated (overrides an already-generated post).
+      const anyRedis: any = redis as any;
+      try { if (typeof anyRedis.del === 'function') await anyRedis.del(ANIMATION_POST_KEY(week)); else await redis.set(ANIMATION_POST_KEY(week), ''); } catch {}
+      try { await redis.set(`animation:scheduled:w${week}`, ''); } catch {}
+    }
 
     await scheduler.runJob({
       name: 'weekly-animation',
       data: { postId, week },
       runAt: new Date(Date.now() + 1000),
     });
-    res.json({ ok: true, message: `Animation job scheduled for week ${week} (runs in ~1s)` });
+    res.json({ ok: true, forced: force, message: `Animation job scheduled for week ${week} (runs in ~1s)${force ? ' [forced regenerate]' : ''}` });
+  } catch (e: any) {
+    res.status(500).json({ ok: false, error: e?.message });
+  }
+});
+
+// Debug: force (re)create the CURRENT week's showcase announcement post, clearing any
+// stale dedup entry first (fixes a week whose announcement was skipped by a stale hash).
+app.post('/api/debug/force-showcase', async (_req, res) => {
+  try {
+    const { subredditName, postId } = context;
+    const week = await ensureCurrentWeek();
+    if (subredditName) {
+      try { await redis.hDel(`weekly_showcase_posts:${subredditName}`, [String(week)]); } catch {}
+    }
+    await redis.set(SHOWCASE_WEEKLY_KEY('', week), '');
+    await redis.set(SHOWCASE_WEEK_META_KEY(week), '');
+    const newId = await ensureWeeklyShowcasePost(postId);
+    res.json({ ok: true, week, postId: newId });
   } catch (e: any) {
     res.status(500).json({ ok: false, error: e?.message });
   }
