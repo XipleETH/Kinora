@@ -1125,11 +1125,10 @@ router.post('/api/finalize-turn', async (_req, res) => {
           stored = { key, timestamp: ts, artist: state.currentArtist, week, storage: 'redis' };
         }
         await redis.set(`frames:data:${postId}:${key}`, JSON.stringify(stored));
-        // update list
-        const frameKeysStr = await redis.get(`frames:list:${postId}`);
-        const frameKeys: string[] = frameKeysStr ? JSON.parse(frameKeysStr) : [];
-        frameKeys.push(key);
-        await redis.set(`frames:list:${postId}`, JSON.stringify(frameKeys));
+        // update the global list + per-week index
+        await ensureIndexBackfilled(postId);
+        await addKeyToIndex(postId, key, week);
+        const frameKeys = await loadFrameKeys(postId);
         // Keep the canvas post id current so the weekly animation cron always finds
         // the frames on the post they were actually saved to.
         try { await redis.set('kinora:main_post_id', postId); } catch {}
@@ -1283,6 +1282,83 @@ async function deleteFrameData(postId: string, frameKey: string){
   await redis.set(FRAME_DATA_KEY(postId, frameKey), '');
 }
 
+// ---- Per-week frame index -------------------------------------------------
+// The global frames:list array grows without bound, and reading a single week used to mean
+// loading every frame to filter by week. These structures let a week be read in O(frames-in-week)
+// and the week list in O(weeks), so the app scales to years of history:
+//   frames:weeks:${postId}        -> sorted JSON array of weeks that have >=1 frame
+//   frames:weekidx:${postId}:${w} -> JSON array of that week's keys (chronological)
+// Frame keys embed the week ("frames/week-3/<id>.png"), so indexing never needs to load a frame.
+const FRAME_WEEKS_KEY = (postId: string) => `frames:weeks:${postId}`;
+const FRAME_WEEKIDX_KEY = (postId: string, week: number) => `frames:weekidx:${postId}:${week}`;
+const FRAME_IDX_BUILT_KEY = (postId: string) => `frames:idx:v1:${postId}`;
+
+function weekFromKey(key: string): number | null {
+  const m = /week-(\d+)\//.exec(key);
+  return m && m[1] ? parseInt(m[1], 10) : null;
+}
+
+async function loadWeeksSet(postId: string): Promise<number[]> {
+  const raw = await redis.get(FRAME_WEEKS_KEY(postId));
+  if (!raw) return [];
+  try { const a = JSON.parse(raw); return Array.isArray(a) ? a : []; } catch { return []; }
+}
+async function loadWeekIndex(postId: string, week: number): Promise<string[]> {
+  const raw = await redis.get(FRAME_WEEKIDX_KEY(postId, week));
+  if (!raw) return [];
+  try { const a = JSON.parse(raw); return Array.isArray(a) ? a : []; } catch { return []; }
+}
+
+// Append a key to its week index and record the week. Also keeps the global list current so the
+// legacy full-scan path and old clients keep working.
+async function addKeyToIndex(postId: string, key: string, week: number): Promise<void> {
+  const keys = await loadFrameKeys(postId);
+  keys.push(key);
+  await saveFrameKeys(postId, keys);
+
+  const idx = await loadWeekIndex(postId, week);
+  if (!idx.includes(key)) { idx.push(key); await redis.set(FRAME_WEEKIDX_KEY(postId, week), JSON.stringify(idx)); }
+
+  const weeks = await loadWeeksSet(postId);
+  if (!weeks.includes(week)) { weeks.push(week); weeks.sort((a, b) => a - b); await redis.set(FRAME_WEEKS_KEY(postId), JSON.stringify(weeks)); }
+}
+
+// Remove keys from the week indexes (global list is rewritten by the caller). Empties out weeks
+// that lose their last frame so frame-weeks never lists a phantom week.
+async function removeKeysFromIndex(postId: string, removed: string[]): Promise<void> {
+  if (!removed.length) return;
+  const gone = new Set(removed);
+  const affectedWeeks = new Set<number>();
+  for (const k of removed) { const w = weekFromKey(k); if (w != null) affectedWeeks.add(w); }
+  let weeks = await loadWeeksSet(postId);
+  for (const w of affectedWeeks) {
+    const idx = (await loadWeekIndex(postId, w)).filter(k => !gone.has(k));
+    await redis.set(FRAME_WEEKIDX_KEY(postId, w), JSON.stringify(idx));
+    if (idx.length === 0) weeks = weeks.filter(x => x !== w);
+  }
+  await redis.set(FRAME_WEEKS_KEY(postId), JSON.stringify(weeks));
+}
+
+// One-time migration: group the existing global list into per-week indexes. Guarded by a flag so
+// it runs once per post. Keys carry the week; only legacy keys without it need a data load.
+async function ensureIndexBackfilled(postId: string): Promise<void> {
+  if (await redis.get(FRAME_IDX_BUILT_KEY(postId))) return;
+  const keys = await loadFrameKeys(postId);
+  const byWeek = new Map<number, string[]>();
+  for (const key of keys) {
+    let w = weekFromKey(key);
+    if (w == null) {
+      const f = await loadFrame(postId, key);
+      w = (f && typeof f.week === 'number') ? f.week : 0;
+    }
+    (byWeek.get(w) ?? byWeek.set(w, []).get(w)!).push(key);
+  }
+  for (const [w, arr] of byWeek) await redis.set(FRAME_WEEKIDX_KEY(postId, w), JSON.stringify(arr));
+  await redis.set(FRAME_WEEKS_KEY(postId), JSON.stringify([...byWeek.keys()].sort((a, b) => a - b)));
+  await redis.set(FRAME_IDX_BUILT_KEY(postId), '1');
+  console.log('[frames:index] backfilled', keys.length, 'keys across', byWeek.size, 'weeks for', postId);
+}
+
 // List frames from Redis storage (canonical route)
 router.get('/api/list-frames', async (req, res) => {
   // Robust listing that tolerates corrupt / missing entries without failing entire request.
@@ -1298,7 +1374,10 @@ router.get('/api/list-frames', async (req, res) => {
   const pageSizeParam = req.query.pageSize || req.query.limit; // backward compatibility
   let pageSize = pageSizeParam ? Math.max(1, Math.min(200, parseInt(String(pageSizeParam),10))) : 50;
     const metaOnly = req.query.meta === '1' || req.query.meta === 'true';
-    let frameKeys = await loadFrameKeys(postId);
+    // When a week is requested, read only that week's index — O(frames-in-week) instead of a
+    // full-history scan. Without a week we keep the legacy global-list scan for back-compat.
+    await ensureIndexBackfilled(postId);
+    let frameKeys = filterWeek ? await loadWeekIndex(postId, filterWeek) : await loadFrameKeys(postId);
     const invalid: string[] = [];
     // Sort by insertion (original order) then we will slice based on pagination *after* filtering invalids and week
     // We iterate full list but stop if size guard triggers.
@@ -1361,8 +1440,16 @@ router.get('/api/list-frames', async (req, res) => {
       }
     }
     if (invalid.length) {
-      // Clean list (best-effort, ignore errors)
-      try { frameKeys = frameKeys.filter(k => !invalid.includes(k)); await saveFrameKeys(postId, frameKeys); } catch {}
+      // Best-effort prune of corrupt keys. Write back to whichever list we read from — the week
+      // index when filtering, the global list otherwise — never cross the two.
+      try {
+        const bad = new Set(invalid);
+        if (filterWeek) {
+          await redis.set(FRAME_WEEKIDX_KEY(postId, filterWeek), JSON.stringify(frameKeys.filter(k => !bad.has(k))));
+        } else {
+          await saveFrameKeys(postId, (await loadFrameKeys(postId)).filter(k => !bad.has(k)));
+        }
+      } catch {}
     }
   // Sort newest-first BEFORE size guard so if we must degrade (remove url) we degrade older frames first
   accepted.sort((a,b)=> b.lastModified - a.lastModified);
@@ -1416,6 +1503,24 @@ router.get('/api/list-frames', async (req, res) => {
   } catch(e:any){
     console.error('[devvit r2/frames] fatal list error', e?.message);
     res.status(500).json({ frames: [], error: 'list failed', message: e?.message });
+  }
+});
+
+// Which weeks have frames, and how many — read straight from the per-week index, so this stays
+// O(weeks) no matter how much history exists. Powers the Play library and the Gallery week list
+// without ever loading a frame.
+router.get('/api/frame-weeks', async (_req, res) => {
+  try {
+    const { postId } = context;
+    if (!postId) return res.json({ weeks: [] });
+    await ensureCurrentWeek();
+    await ensureIndexBackfilled(postId);
+    const weeks = await loadWeeksSet(postId);
+    const out = await Promise.all(weeks.map(async w => ({ week: w, count: (await loadWeekIndex(postId, w)).length })));
+    res.json({ weeks: out.filter(w => w.count > 0) });
+  } catch (e: any) {
+    console.error('[frame-weeks] error', e?.message);
+    res.json({ weeks: [] });
   }
 });
 
@@ -1495,13 +1600,11 @@ router.post('/api/upload-frame', async (req, res) => {
       stored = { key, dataUrl, timestamp: ts, artist: username || 'anonymous', week, storage: 'redis' };
     }
     await redis.set(`frames:data:${postId}:${key}`, JSON.stringify(stored));
-    
-    // Update frames list
-    const frameKeysStr = await redis.get(`frames:list:${postId}`);
-    const frameKeys: string[] = frameKeysStr ? JSON.parse(frameKeysStr) : [];
-    frameKeys.push(key);
-    await redis.set(`frames:list:${postId}`, JSON.stringify(frameKeys));
-    
+
+    // Update the global list + per-week index in one place.
+    await ensureIndexBackfilled(postId);
+    await addKeyToIndex(postId, key, week);
+
     console.log('[upload-frame] stored', key, 'storage:', stored.storage, 'for post', postId);
     res.json({ ok: true, key, url: mediaUrl || dataUrl });
   } catch(e: any) {
@@ -1958,6 +2061,7 @@ router.post('/api/admin/reset-fresh', async (req, res) => {
       const keys: string[] = raw ? JSON.parse(raw) : [];
       for (const key of keys) { try { await redis.set(`frames:data:${postId}:${key}`, ''); framesDeleted++; } catch {} }
       await redis.set(listKey, JSON.stringify([]));
+      await removeKeysFromIndex(postId, keys);
     }
 
     // Seed Week 1 ballot with the first house preset.
@@ -1993,8 +2097,9 @@ router.post('/api/admin/clear-frames', async (req, res) => {
     for (const key of keys) {
       try { await redis.set(`frames:data:${targetPostId}:${key}`, ''); deleted++; } catch {}
     }
-    // Clear the list
+    // Clear the list + per-week index
     await redis.set(listKey, JSON.stringify([]));
+    await removeKeysFromIndex(targetPostId, keys);
     console.log('[admin] cleared', deleted, 'frames for post', targetPostId);
     res.json({ ok: true, deleted, postId: targetPostId });
   } catch (e: any) {
@@ -2031,6 +2136,9 @@ router.post('/api/admin/clear-week', async (req, res) => {
       } catch { kept.push(key); }
     }
     await redis.set(listKey, JSON.stringify(kept));
+    // The whole week is gone: drop its index and remove it from the weeks set.
+    await redis.set(FRAME_WEEKIDX_KEY(postId, targetWeek), JSON.stringify([]));
+    await redis.set(FRAME_WEEKS_KEY(postId), JSON.stringify((await loadWeeksSet(postId)).filter(w => w !== targetWeek)));
 
     // 2. Clear showcase dedupe hash for this week
     if (subredditName) {

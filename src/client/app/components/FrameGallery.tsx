@@ -3,43 +3,80 @@ import { Frame } from '../App';
 import { User, Calendar, ArrowBigUp, ArrowBigDown } from 'lucide-react';
 
 interface FrameGalleryProps {
-  frames: Frame[];
   pendingFrame?: { imageData: string; startedAt: number } | null;
   initialVotes?: Record<string, { up: number; down: number; my: -1|0|1 }>;
   showModeration?: boolean;  // Force show moderation panel (override auto-detect)
   currentWeek?: number;      // so the current week's group shows even with 0 frames
 }
 
-export const FrameGallery: React.FC<FrameGalleryProps> = ({ frames, pendingFrame, initialVotes, showModeration, currentWeek }) => {
+const mapItemToFrame = (o: any): Frame => ({
+  id: o.key, imageData: o.src || o.url || '', timestamp: o.lastModified || Date.now(),
+  artist: o.artist || 'anonymous', paletteWeek: o.week ?? 0, key: o.key,
+});
+
+// The gallery lists every week from the O(weeks) /api/frame-weeks index and loads a week's frames
+// only when its accordion opens (?week=N). So opening the gallery — and each week — costs one
+// week's worth of data, never the whole history. That is what lets it hold years of frames.
+export const FrameGallery: React.FC<FrameGalleryProps> = ({ pendingFrame, initialVotes, showModeration, currentWeek }) => {
+  const [weekCounts, setWeekCounts] = useState<Record<number, number>>({});
+  const [weekFrames, setWeekFrames] = useState<Record<number, Frame[]>>({});
+  const [loadingWeeks, setLoadingWeeks] = useState<Record<number, boolean>>({});
   const [openWeeks, setOpenWeeks] = useState<Record<number, boolean>>({});
-  const [votes, setVotes] = useState<Record<string, { up: number; down: number; my: -1|0|1 }>>({});
+  const [votes, setVotes] = useState<Record<string, { up: number; down: number; my: -1|0|1 }>>(initialVotes ? { ...initialVotes } : {});
   const [isMod, setIsMod] = useState(false);
   const [modFrames, setModFrames] = useState<any[]>([]);
   const [fetchingDirectors, setFetchingDirectors] = useState(false);
   // Store resolved winning bundle data (theme + palette + brush names) per week
   const [weekBundles, setWeekBundles] = useState<Record<number,{ theme:string; palette:string[]; brushes:string[]; director?:string }>>({});
-  const toggleWeek = useCallback((week:number)=>{ setOpenWeeks(o=>({...o,[week]:!o[week]})); },[]);
+  const [hydrated, setHydrated] = useState<Record<string,string>>({});
   const formatDate = (timestamp: number) => new Date(timestamp).toLocaleDateString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
 
-  // Seed votes from incoming frames or fetch list once
+  // Which weeks exist + their counts — cheap, index-backed. No frame data loaded here.
   useEffect(()=>{
-    if (initialVotes) { setVotes({ ...initialVotes }); return; }
+    let cancel = false;
     (async ()=>{
       try {
-        const r = await fetch('/api/list-frames');
+        const r = await fetch('/api/frame-weeks');
         if (!r.ok) return;
         const j = await r.json();
-        const acc: Record<string, { up:number; down:number; my:-1|0|1 }> = {};
-        for (const f of (j.frames||[])) {
-          const k = f.key || f.id; if (!k) continue;
-          if (f.votesUp != null || f.votesDown != null || f.myVote != null) {
-            acc[k] = { up: f.votesUp||0, down: f.votesDown||0, my: (f.myVote ?? 0) as (-1|0|1) };
-          }
-        }
-        if (Object.keys(acc).length) setVotes(acc);
+        if (cancel) return;
+        const counts: Record<number, number> = {};
+        for (const w of (j.weeks || [])) counts[w.week] = w.count;
+        setWeekCounts(counts);
       } catch {/* ignore */}
     })();
-  }, [initialVotes]);
+    return ()=>{ cancel = true; };
+  }, []);
+
+  // Load one week's frames on demand (accordion open), and seed that week's votes from the same
+  // response. Past weeks are cached; the current week is refetched since it can still grow.
+  const ensureWeekLoaded = useCallback(async (week: number, force = false)=>{
+    if (!force && weekFrames[week]) return;
+    setLoadingWeeks(s=>({ ...s, [week]: true }));
+    try {
+      const r = await fetch(`/api/list-frames?week=${week}&meta=1`);
+      if (r.ok) {
+        const j = await r.json();
+        const arr: Frame[] = (j.frames || []).map(mapItemToFrame).sort((a:Frame,b:Frame)=>a.timestamp-b.timestamp);
+        setWeekFrames(m=>({ ...m, [week]: arr }));
+        setWeekCounts(c=>({ ...c, [week]: arr.length }));
+        if (!initialVotes) {
+          setVotes(v=>{
+            const nv = { ...v };
+            for (const f of (j.frames || [])) {
+              const k = f.key; if (!k) continue;
+              if (f.votesUp != null || f.votesDown != null || f.myVote != null) nv[k] = { up: f.votesUp||0, down: f.votesDown||0, my: (f.myVote ?? 0) as (-1|0|1) };
+            }
+            return nv;
+          });
+        }
+      }
+    } catch {/* ignore */} finally { setLoadingWeeks(s=>({ ...s, [week]: false })); }
+  }, [weekFrames, initialVotes]);
+
+  const toggleWeek = useCallback((week:number)=>{
+    setOpenWeeks(o=>{ const next = { ...o, [week]: !o[week] }; if (next[week]) void ensureWeekLoaded(week); return next; });
+  }, [ensureWeekLoaded]);
 
   // Moderation queue auto-detect
   useEffect(()=>{ (async ()=>{
@@ -48,7 +85,6 @@ export const FrameGallery: React.FC<FrameGalleryProps> = ({ frames, pendingFrame
       const me = await fetch('/api/mod/me');
       if (me.ok) {
         const j = await me.json();
-        // showModeration true forces panel; otherwise rely on server response j.isMod
         if (showModeration === true || j.isMod) {
           setIsMod(true);
           const r = await fetch('/api/mod/frames');
@@ -74,71 +110,34 @@ export const FrameGallery: React.FC<FrameGalleryProps> = ({ frames, pendingFrame
     } catch {/* ignore */}
   }, []);
 
-  // Hydration cache for frames whose imageData was omitted (degraded on backend)
-  const [hydrated, setHydrated] = useState<Record<string,string>>({});
-
   const hydrateFrame = useCallback(async (frame: Frame) => {
     if (!frame || !frame.key) return;
     if (hydrated[frame.key]) return; // already hydrated
     try {
-      // Fetch binary/png directly from backend using the canonical endpoint
       const binResp = await fetch(`/api/frame/${encodeURIComponent(frame.key)}`);
       if (binResp.ok) {
         const blob = await binResp.blob();
         const reader = new FileReader();
-        reader.onload = () => {
-          const dataUrl = reader.result as string;
-          setHydrated(h => ({ ...h, [frame.key!]: dataUrl }));
-        };
+        reader.onload = () => { const dataUrl = reader.result as string; setHydrated(h => ({ ...h, [frame.key!]: dataUrl })); };
         reader.readAsDataURL(blob);
       }
     } catch {/* ignore */}
   }, [hydrated]);
 
-  // Dedupe: if pending frame image matches the last published frame image, suppress it
-  let showPending = false;
-  if (pendingFrame) {
-    if (frames.length === 0) showPending = true; else {
-      const lastImg = frames.at(-1)?.imageData.split('?')[0];
-      const pendingImg = pendingFrame.imageData.split('?')[0];
-      showPending = lastImg !== pendingImg;
-    }
-  }
-
-  if (frames.length === 0 && !showPending && !currentWeek) return (
-    <div className="text-center py-16">
-      <div className="bg-white/10 backdrop-blur-sm rounded-2xl p-12 border border-white/20 max-w-md mx-auto">
-        <h3 className="text-2xl font-bold text-white mb-4">No frames yet</h3>
-        <p className="text-white/70 mb-6">Start drawing to create your first frame and contribute to the collaborative video.</p>
-        <div className="w-24 h-24 bg-gradient-to-r from-purple-500 to-pink-500 rounded-full mx-auto opacity-20" />
-      </div>
-    </div>
-  );
-
-  // Group frames by paletteWeek
-  const grouped = useMemo(()=>{
-    const map = new Map<number, Frame[]>();
-    for (const f of frames) {
-      const arr = map.get(f.paletteWeek) || [];
-      arr.push(f);
-      map.set(f.paletteWeek, arr);
-    }
-    // Always show the current week's group (even with no frames yet) so the week's
-    // gallery appears the moment the week changes — not only after the first frame.
-    if (currentWeek && !map.has(currentWeek)) map.set(currentWeek, []);
-    return Array.from(map.entries()).sort((a,b)=>a[0]-b[0]);
-  }, [frames, currentWeek]);
-
-  // Extract distinct week numbers (including the current week)
-  const weekNumbers = useMemo(()=> {
-    const s = new Set(frames.map(f=>f.paletteWeek));
+  // Weeks to render: every week that has frames, plus the current week even if still empty, so its
+  // gallery appears the moment the week rolls over — not only after the first frame.
+  const weekNumbers = useMemo(()=>{
+    const s = new Set<number>(Object.keys(weekCounts).map(Number));
     if (currentWeek) s.add(currentWeek);
     return Array.from(s).sort((a,b)=>a-b);
-  }, [frames, currentWeek]);
+  }, [weekCounts, currentWeek]);
 
-  // Fetch each week's AUTHORITATIVE bundle (theme/palette/brushes/director) from the
-  // server so every past week shows the config it was actually drawn with — not the
-  // current week's palette (which was the bug that changed old weeks' colors).
+  const totalPublished = useMemo(()=> Object.values(weekCounts).reduce((a,b)=>a+b,0), [weekCounts]);
+
+  const showPending = !!pendingFrame; // header dedupe removed with the full-list load; pending is shown while in progress
+
+  // Fetch each week's AUTHORITATIVE bundle (theme/palette/brushes/director) so every past week
+  // shows the config it was actually drawn with, not the current week's palette.
   useEffect(()=>{
     let cancel = false;
     (async ()=>{
@@ -146,12 +145,8 @@ export const FrameGallery: React.FC<FrameGalleryProps> = ({ frames, pendingFrame
       setFetchingDirectors(true);
       try {
         const results = await Promise.all(weekNumbers.map(async w => {
-          try {
-            const r = await fetch(`/api/week-bundle?week=${w}`);
-            if (!r.ok) return null;
-            const j = await r.json();
-            return { week: w, bundle: j };
-          } catch { return null; }
+          try { const r = await fetch(`/api/week-bundle?week=${w}`); if (!r.ok) return null; return { week: w, bundle: await r.json() }; }
+          catch { return null; }
         }));
         if (cancel) return;
         const bundles: Record<number,{ theme:string; palette:string[]; brushes:string[]; director?:string }> = {};
@@ -169,7 +164,17 @@ export const FrameGallery: React.FC<FrameGalleryProps> = ({ frames, pendingFrame
       } finally { if (!cancel) setFetchingDirectors(false); }
     })();
     return ()=>{ cancel = true; };
-  }, [weekNumbers]);
+  }, [weekNumbers.join(',')]);
+
+  if (weekNumbers.length === 0 && !showPending) return (
+    <div className="text-center py-16">
+      <div className="bg-white/10 backdrop-blur-sm rounded-2xl p-12 border border-white/20 max-w-md mx-auto">
+        <h3 className="text-2xl font-bold text-white mb-4">No frames yet</h3>
+        <p className="text-white/70 mb-6">Start drawing to create your first frame and contribute to the collaborative video.</p>
+        <div className="w-24 h-24 bg-gradient-to-r from-purple-500 to-pink-500 rounded-full mx-auto opacity-20" />
+      </div>
+    </div>
+  );
 
   return (
       <div className="space-y-10">
@@ -206,7 +211,7 @@ export const FrameGallery: React.FC<FrameGalleryProps> = ({ frames, pendingFrame
         )}
         <div className="text-center">
           <h2 className="text-4xl font-bold text-white mb-2">Frame Gallery</h2>
-          <p className="text-white/70 text-sm sm:text-base">{frames.length} frames published{showPending ? ' • 1 in progress' : ''}</p>
+          <p className="text-white/70 text-sm sm:text-base">{totalPublished} frames published{showPending ? ' • 1 in progress' : ''}</p>
         </div>
 
   {showPending && pendingFrame && (
@@ -214,19 +219,10 @@ export const FrameGallery: React.FC<FrameGalleryProps> = ({ frames, pendingFrame
               <div className="mb-4">
               <h3 className="text-white/80 text-sm font-semibold mb-1 tracking-wide uppercase">In progress</h3>
               <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-5 xl:grid-cols-6 gap-3">
-                <div
-                  className="relative bg-white/10 backdrop-blur-sm rounded-2xl overflow-hidden border border-yellow-400/40 hover:bg-white/20 transition-all duration-300"
-                >
+                <div className="relative bg-white/10 backdrop-blur-sm rounded-2xl overflow-hidden border border-yellow-400/40 hover:bg-white/20 transition-all duration-300">
                   <div className="relative aspect-[9/16] bg-black/40 flex items-center justify-center">
-                    <img
-                      src={pendingFrame.imageData}
-                      alt="Pending frame"
-                      className="w-full h-full object-contain opacity-90"
-                      loading="lazy"
-                    />
-                    <div className="absolute top-2 left-2 bg-yellow-500/80 text-black text-xs font-bold px-2 py-1 rounded">
-                      In progress
-                    </div>
+                    <img src={pendingFrame.imageData} alt="Pending frame" className="w-full h-full object-contain opacity-90" loading="lazy" />
+                    <div className="absolute top-2 left-2 bg-yellow-500/80 text-black text-xs font-bold px-2 py-1 rounded">In progress</div>
                   </div>
                   <div className="p-2">
                     <div className="flex items-center justify-between mb-0.5">
@@ -244,12 +240,10 @@ export const FrameGallery: React.FC<FrameGalleryProps> = ({ frames, pendingFrame
           </div>
         )}
 
-  {/* Week meta helpers (palette/theme/brushes). Keep in sync with App weekly palettes. */}
-  {grouped.map(([week, list])=>{
+  {weekNumbers.map((week)=>{
+          const list = weekFrames[week] || [];
           const sorted = [...list].sort((a,b)=>a.timestamp-b.timestamp);
-          // Until this week's real bundle has loaded from the server, show NEUTRAL
-          // placeholder stripes (not a guessed palette) so wrong colors never flash
-          // before the correct ones.
+          const count = weekCounts[week] ?? sorted.length;
           const bundle = weekBundles[week];
           const loaded = !!(bundle && Array.isArray(bundle.palette) && bundle.palette.length >= 3);
           const NEUTRAL_STRIPES = ['#e7e0cf','#ded7c4','#e7e0cf','#ded7c4','#e7e0cf','#ded7c4'];
@@ -257,6 +251,8 @@ export const FrameGallery: React.FC<FrameGalleryProps> = ({ frames, pendingFrame
           const theme = loaded ? (bundle!.theme || (week === 1 ? 'Moving Lines' : '')) : '';
           const director = loaded ? (bundle!.director || undefined) : undefined;
           const brushLine = (loaded && bundle!.brushes && bundle!.brushes.length) ? bundle!.brushes.join(', ') : '';
+          const isOpen = !!openWeeks[week];
+          const isLoading = !!loadingWeeks[week];
           return (
             <div key={week} className="max-w-[1580px] mx-auto px-2">
               <div className="clapper">
@@ -266,14 +262,14 @@ export const FrameGallery: React.FC<FrameGalleryProps> = ({ frames, pendingFrame
                   </div>
                   <div className="clapper-meta-row" style={{rowGap:4}}>
                     <button onClick={()=>toggleWeek(week)} className="clapper-toggle-btn" aria-label="Toggle Week">
-                      {openWeeks[week] ? '−' : '+'}
+                      {isOpen ? '−' : '+'}
                     </button>
                     <div style={{display:'flex',flexDirection:'column',minWidth:160}}>
                       <span className="clapper-title">Week {week} Theme: {theme}</span>
                     </div>
                     <div className="clapper-info-line" style={{minWidth:70}}>
                       <span className="clapper-label">Frames</span>
-                      <span className="clapper-sub">{sorted.length}</span>
+                      <span className="clapper-sub">{count}</span>
                     </div>
                     <div className="clapper-info-line" style={{flex:1,minWidth:140}}>
                       <span className="clapper-label">Brushes</span>
@@ -285,35 +281,28 @@ export const FrameGallery: React.FC<FrameGalleryProps> = ({ frames, pendingFrame
                     </div>
                   </div>
                 </div>
-                <div className={`clapper-body ${openWeeks[week] ? '' : 'closed'}`}> 
+                <div className={`clapper-body ${isOpen ? '' : 'closed'}`}>
                   <div className="clapper-grid">
-                    {sorted.length === 0 ? (
+                    {isOpen && isLoading && sorted.length === 0 ? (
+                      <div style={{gridColumn:'1 / -1', textAlign:'center', padding:'18px 8px', fontSize:12, opacity:0.6}}>Loading…</div>
+                    ) : sorted.length === 0 ? (
                       <div style={{gridColumn:'1 / -1', textAlign:'center', padding:'18px 8px', fontSize:12, opacity:0.6}}>No frames yet this week — be the first to draw!</div>
-                    ) : [...sorted].reverse().map((frame)=>{
-                      const index = frames.indexOf(frame);
+                    ) : [...sorted].reverse().map((frame, ri)=>{
+                      const num = sorted.length - ri; // 1-based position within the week
                       const key = (frame as any).key || frame.id;
                       const preferredSrc = (frame as any).src || frame.imageData || hydrated[key];
                       return (
                         <div key={key} className="clapper-frame-card">
                           <div className="clapper-thumb">
                             {preferredSrc ? (
-                              <img
-                                src={preferredSrc}
-                                alt={`Frame ${index+1}`}
-                                loading="lazy"
-                                onError={()=>{ if(!hydrated[key]) hydrateFrame(frame); }}
-                              />
+                              <img src={preferredSrc} alt={`Frame ${num}`} loading="lazy" onError={()=>{ if(!hydrated[key]) hydrateFrame(frame); }} />
                             ) : (
-                              <button
-                                onClick={()=>hydrateFrame(frame)}
-                                className="vote-btn"
-                                title="Load image"
-                              >Load</button>
+                              <button onClick={()=>hydrateFrame(frame)} className="vote-btn" title="Load image">Load</button>
                             )}
                           </div>
                           <div className="clapper-frame-meta">
                             <div style={{display:'flex',justifyContent:'space-between',alignItems:'center'}}>
-                              <span style={{fontSize:10,fontWeight:600}}>#{index+1}</span>
+                              <span style={{fontSize:10,fontWeight:600}}>#{num}</span>
                               <span style={{fontSize:9,opacity:0.6}}>{new Date(frame.timestamp).toLocaleTimeString()}</span>
                             </div>
                             <div style={{display:'flex',alignItems:'center',gap:4,marginTop:2,fontSize:9}}>

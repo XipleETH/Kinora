@@ -153,26 +153,15 @@ function App() {
     };
   }, [currentWeek]);
 
-  // Fetch all frames metadata with pagination to avoid server size guard truncation
-  const fetchAllFramesMeta = useCallback(async (): Promise<Frame[]> => {
-    const pageSize = 200;
-    const first = await fetch(`/api/list-frames?meta=1&page=1&pageSize=${pageSize}`);
-    if (!first.ok) return [];
-    const j = await first.json();
-    const all: any[] = Array.isArray(j.frames) ? j.frames.slice() : [];
-    const totalPages: number = j.totalPages || 1;
-    if (totalPages > 1) {
-      // Fetch the rest pages sequentially to avoid server overload
-      for (let p = 2; p <= totalPages; p++) {
-        try {
-          const r = await fetch(`/api/list-frames?meta=1&page=${p}&pageSize=${pageSize}`);
-          if (!r.ok) continue;
-          const jj = await r.json();
-          if (Array.isArray(jj.frames)) all.push(...jj.frames);
-        } catch {}
-      }
-    }
-    // Map to client frames, dedupe by key and sort by timestamp asc
+  // App's own use of `frames` is entirely current-week (onion skin, canvas restore, the remount
+  // key, button enablement), so it fetches only the current week — one index-backed request,
+  // bounded by a week's frame count. History browsing lives in Gallery/Play, which load per week
+  // on demand. This is what lets the app run for years without every load scanning all history.
+  const fetchCurrentWeekFrames = useCallback(async (): Promise<Frame[]> => {
+    const r = await fetch(`/api/list-frames?week=${currentWeek}&meta=1`);
+    if (!r.ok) return [];
+    const j = await r.json();
+    const all: any[] = Array.isArray(j.frames) ? j.frames : [];
     const byKey = new Map<string, Frame>();
     for (const o of all) {
       const f = mapServerItemToFrame(o);
@@ -181,7 +170,7 @@ function App() {
       if (!prev || f.timestamp > prev.timestamp) byKey.set(f.key, f);
     }
     return Array.from(byKey.values()).sort((a,b)=>a.timestamp - b.timestamp);
-  }, [mapServerItemToFrame]);
+  }, [mapServerItemToFrame, currentWeek]);
 
   // Auto-hydrate latest frame image so onion-skin and spectators show the newest image even if meta omitted url
   const hydrateLatestFrameIfNeeded = useCallback(async (list: Frame[]) => {
@@ -212,13 +201,13 @@ function App() {
   useEffect(() => {
     const interval = window.setInterval(async () => {
       try {
-        const list = await fetchAllFramesMeta();
+        const list = await fetchCurrentWeekFrames();
         const withHydration = await hydrateLatestFrameIfNeeded(list);
         setFrames(withHydration);
       } catch {}
     }, 20000);
     return () => window.clearInterval(interval);
-  }, [fetchAllFramesMeta, hydrateLatestFrameIfNeeded]);
+  }, [fetchCurrentWeekFrames, hydrateLatestFrameIfNeeded]);
   const canvasCardRef = useRef<HTMLDivElement | null>(null);
   // How much room does the draw row have left beside canvas + tools? Remeasured on any of the
   // three resizing. None of the measured widths depend on the chat being mounted, so showing it
@@ -719,7 +708,7 @@ function App() {
            }
          }
          // Reload frames list (meta) to include newly finalized frame
-         const updatedList = await fetchAllFramesMeta();
+         const updatedList = await fetchCurrentWeekFrames();
          const withHydration = await hydrateLatestFrameIfNeeded(updatedList);
          setFrames(withHydration);
       } catch {}
@@ -800,14 +789,14 @@ function App() {
   useEffect(() => {
     (async () => {
       try {
-        const list = await fetchAllFramesMeta();
+        const list = await fetchCurrentWeekFrames();
         const withHydration = await hydrateLatestFrameIfNeeded(list);
         setFrames(withHydration);
       } catch (e) {
         // silent
       }
     })();
-  }, [currentWeek, fetchAllFramesMeta, hydrateLatestFrameIfNeeded]);
+  }, [currentWeek, fetchCurrentWeekFrames, hydrateLatestFrameIfNeeded]);
 
   const clearCanvas = () => {
     if (!canvasRef.current) return;
@@ -1118,7 +1107,6 @@ function App() {
 
         {currentView === 'gallery' && (
           <FrameGallery
-            frames={frames}
             currentWeek={currentWeek}
             pendingFrame={(pendingFrameDataUrl || sharedPending) ? { imageData: pendingFrameDataUrl || sharedPending!.imageData, startedAt: sessionStartTs || sharedPending?.timestamp || Date.now() } : null}
           />
@@ -1126,7 +1114,7 @@ function App() {
   {/* Upload debug panels removed */}
 
         {currentView === 'video' && (
-          <VideoPlayer frames={frames} fitHeight={!isMobile} />
+          <VideoPlayer fitHeight={!isMobile} />
         )}
 
         {currentView === 'voting' && (
