@@ -101,7 +101,7 @@ export const Chat:React.FC<ChatProps> = ({ currentWeek, currentUser, inline, sid
       console.debug('[chat] sending', { body });
   const r = await fetch('/api/chat',{ method:'POST', headers:{ 'Content-Type':'application/json' }, body: JSON.stringify({ body }) });
       if(!r.ok){
-        setError('falló enviar');
+        setError('send failed');
         if(r.status===401){ setError('no auth'); }
       } else {
         // Force immediate refresh so user sees their message without waiting interval
@@ -110,30 +110,25 @@ export const Chat:React.FC<ChatProps> = ({ currentWeek, currentUser, inline, sid
           if(gr.ok){ const j=await gr.json(); if(Array.isArray(j.messages)) setMessages(j.messages); }
         } catch{}
       }
-    } catch(e){ setError('falló enviar'); }
+    } catch(e){ setError('send failed'); }
   };
   const onKey = (e:React.KeyboardEvent<HTMLInputElement>)=>{ if(e.key==='Enter'){ e.preventDefault(); send(); } };
 
-  // Inline = paper panel matching the tools rail; standalone = the existing full-width view.
+  // Both variants are the same paper panel; `inline` only tightens the chrome to rail scale
+  // and adds the side toggle. Standalone fills its view, inline matches the rail height.
   return (
     <div
-      className={inline
-        ? 'sketch-border panel-hatch rounded-xl overflow-hidden flex flex-col w-full'
-        : 'flex flex-col h-[calc(100dvh-120px)] md:h-full md:max-h-[540px] bg-black/30 rounded-xl border border-white/10'}
+      className={`sketch-border panel-hatch rounded-xl overflow-hidden flex flex-col ${inline ? 'w-full' : 'h-[calc(100dvh-120px)] md:h-full md:max-h-[540px]'}`}
       style={inline ? { height: maxHeight ?? 540 } : undefined}
     >
-      <div className={inline
-        ? 'px-2.5 py-1.5 border-b-2 border-black/70 flex items-center justify-between gap-1'
-        : 'px-4 py-2 border-b border-white/10 flex items-center gap-2'}>
+      <div className={`border-b-2 border-black/70 flex items-center justify-between gap-1 ${inline ? 'px-2.5 py-1.5' : 'px-4 py-2.5'}`}>
         <div className="flex items-baseline gap-1.5 min-w-0">
-          {inline
-            ? <h3 className="text-[13px] font-semibold tracking-wide shrink-0">Chat W{week}</h3>
-            : <h3 className="text-white font-semibold text-lg">Chat Semana {week}</h3>}
-          <span className={inline
-            ? `text-[10px] shrink-0 ${connected? 'text-green-700':'text-yellow-700'}`
-            : `text-xs ${connected? 'text-green-400':'text-yellow-400'}`}>{connected? 'en vivo':'conectando...'}</span>
-          {username && <span className={inline ? 'text-[10px] text-black/50 truncate' : 'text-xs text-white/50'}>tú: {username}</span>}
-          {error && <span className={inline ? 'text-[10px] text-red-700 shrink-0' : 'text-red-400 text-xs'}>{error}</span>}
+          <h3 className={`font-semibold tracking-wide shrink-0 ${inline ? 'text-[13px]' : 'text-lg'}`}>
+            {inline ? `Chat W${week}` : `Chat — Week ${week}`}
+          </h3>
+          <span className={`shrink-0 ${inline ? 'text-[10px]' : 'text-xs'} ${connected? 'text-green-700':'text-yellow-700'}`}>{connected? 'live':'connecting…'}</span>
+          {username && <span className={`text-black/50 truncate ${inline ? 'text-[10px]' : 'text-xs'}`}>you: {username}</span>}
+          {error && <span className={`text-red-700 shrink-0 ${inline ? 'text-[10px]' : 'text-xs'}`}>{error}</span>}
         </div>
         {inline && onToggleSide && (
           <button onClick={onToggleSide} className="p-1 rounded-md pencil-btn shrink-0" aria-label="Switch side" title="Switch side">
@@ -141,37 +136,28 @@ export const Chat:React.FC<ChatProps> = ({ currentWeek, currentUser, inline, sid
           </button>
         )}
       </div>
-      <div ref={listRef} className={inline
-        ? 'flex-1 overflow-y-auto px-2 py-2 space-y-1.5 text-[13px]'
-        : 'flex-1 overflow-y-auto px-4 py-3 space-y-2 text-sm'}>
-        {messages.length===0 && <div className={inline ? 'text-black/40 text-center py-6 text-[12px]' : 'text-white/40 text-center py-8'}>Sin mensajes aún</div>}
+      <div ref={listRef} className={`flex-1 overflow-y-auto ${inline ? 'px-2 py-2 space-y-1.5 text-[13px]' : 'px-4 py-3 space-y-2 text-sm'}`}>
+        {messages.length===0 && <div className={`text-black/40 text-center ${inline ? 'py-6 text-[12px]' : 'py-8'}`}>No messages yet</div>}
         {messages.map(m=> (
-          <div key={m.id} className={inline
-            ? 'rounded-md border border-black/25 bg-[#FAF3E0] px-2 py-1.5 leading-snug break-words'
-            : 'bg-white/5 rounded-md px-3 py-1.5 leading-snug'}>
-            <span className={inline ? 'font-semibold' : 'text-white font-medium'}>{m.user}</span>{' '}
-            <span className={inline ? 'text-black/80' : 'text-white/90'}>{m.body}</span>
-            <span className={inline ? 'text-black/35 text-[10px] ml-1' : 'text-white/30 text-[10px] ml-2'}>{new Date(m.ts).toLocaleTimeString()}</span>
+          <div key={m.id} className={`rounded-md border border-black/25 bg-[#FAF3E0] leading-snug break-words ${inline ? 'px-2 py-1.5' : 'px-3 py-2'}`}>
+            <span className="font-semibold">{m.user}</span>{' '}
+            <span className="text-black/80">{m.body}</span>
+            {/* Fixed en-US: the default locale rendered "10:53:16 p. m." for Spanish users. */}
+            <span className={`text-black/35 ml-1 ${inline ? 'text-[10px]' : 'text-[11px]'}`}>{new Date(m.ts).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })}</span>
           </div>
         ))}
       </div>
-      <div className={inline
-        ? 'p-2 border-t-2 border-black/70 flex gap-1.5'
-        : 'p-3 border-t border-white/10 flex gap-2'}>
+      <div className={`border-t-2 border-black/70 flex ${inline ? 'p-2 gap-1.5' : 'p-3 gap-2'}`}>
         <input
           value={input}
           // allow input even anon; server will tag as anon
           disabled={false}
           onChange={e=> setInput(e.target.value.slice(0,280))}
           onKeyDown={onKey}
-          placeholder={inline ? 'Mensaje + Enter' : 'Escribe un mensaje y Enter'}
-          className={inline
-            ? 'flex-1 min-w-0 rounded-md border-2 border-black bg-[#FAF3E0] px-2 py-1.5 text-[13px] placeholder-black/40 focus:outline-none'
-            : 'flex-1 bg-white/10 rounded-md px-3 py-2 text-white placeholder-white/40 text-sm focus:outline-none'}
+          placeholder={inline ? 'Message + Enter' : 'Type a message and hit Enter'}
+          className={`flex-1 min-w-0 rounded-md border-2 border-black bg-[#FAF3E0] placeholder-black/40 focus:outline-none ${inline ? 'px-2 py-1.5 text-[13px]' : 'px-3 py-2 text-sm'}`}
         />
-        <button onClick={send} disabled={!input.trim()} className={inline
-          ? 'pencil-btn pencil-fill-indigo rounded-md px-2.5 text-[12px] font-semibold disabled:opacity-40 shrink-0'
-          : 'bg-indigo-500 hover:bg-indigo-600 disabled:opacity-40 text-white font-semibold px-4 rounded-md text-sm'}>Enviar</button>
+        <button onClick={send} disabled={!input.trim()} className={`pencil-btn pencil-fill-indigo rounded-md font-semibold disabled:opacity-40 shrink-0 ${inline ? 'px-2.5 text-[12px]' : 'px-4 text-sm'}`}>Send</button>
       </div>
     </div>
   );
