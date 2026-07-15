@@ -58,21 +58,20 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({ frames, fitHeight }) =
     return ()=>{ cancel = true; };
   },[weekKey]);
 
-  // Desktop: hand the player the height left between it and the picker, so the picker stays on
-  // screen instead of being pushed below the fold by the player's fixed 9:16 height. Mobile keeps
-  // its natural size — scrolling a phone to reach the picker is expected.
+  // Desktop puts the picker in a right-hand column, which frees the player to use the full
+  // screen height (it is portrait, so height is what makes it big). Mobile keeps its natural
+  // size with the picker stacked below — scrolling a phone to reach it is expected.
   const videoRowRef = useRef<HTMLDivElement>(null);
-  const pickerRef = useRef<HTMLDivElement>(null);
-  const [videoMaxH,setVideoMaxH] = useState<number|undefined>(undefined);
+  const [videoH,setVideoH] = useState<number|undefined>(undefined);
   useEffect(()=>{
-    if(!fitHeight){ setVideoMaxH(undefined); return; }
+    if(!fitHeight){ setVideoH(undefined); return; }
     const update = ()=>{
       const row = videoRowRef.current;
       if(!row) return;
       const top = row.getBoundingClientRect().top;
-      const pickerH = pickerRef.current?.getBoundingClientRect().height ?? 0;
-      // The player's own caption + frame count live inside the row, hence the extra slack.
-      setVideoMaxH(Math.max(220, window.innerHeight - top - pickerH - 96));
+      // Slack covers the player's own caption above and frame count below (both inside the
+      // measured row), plus the page's bottom padding.
+      setVideoH(Math.max(240, window.innerHeight - top - 84));
     };
     update();
     window.addEventListener('resize', update);
@@ -84,15 +83,20 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({ frames, fitHeight }) =
   }
   return (
     <div className="space-y-6">
-      <h2 className="text-center text-3xl font-bold text-white">Weekly Carousel</h2>
+      <h2 className="text-center text-3xl font-bold text-white">Animation Gallery</h2>
       {/* One week at a time — the chevrons and the picker below move between weeks. */}
-      <div ref={videoRowRef} className="flex items-center justify-center gap-4">
-        <button onClick={()=> prev && setFocusWeek(prev.week)} disabled={!prev} aria-label="Previous week" className={`p-2 rounded-full border border-white/20 text-white/70 hover:text-white hover:bg-white/10 ${!prev? 'opacity-30 cursor-not-allowed':''}`}><ChevronLeft className="w-5 h-5"/></button>
-        {current && <WeekVideo frames={current.frames} title={`Week ${current.week}`} maxHeight={videoMaxH}/>}
-        <button onClick={()=> next && setFocusWeek(next.week)} disabled={!next} aria-label="Next week" className={`p-2 rounded-full border border-white/20 text-white/70 hover:text-white hover:bg-white/10 ${!next? 'opacity-30 cursor-not-allowed':''}`}><ChevronRight className="w-5 h-5"/></button>
-      </div>
-      <div ref={pickerRef} className="pt-2">
-        <div className="flex flex-wrap gap-2 justify-center">
+      {/* Desktop: player left, clapper library right. Mobile: stacked. */}
+      <div ref={videoRowRef} className={fitHeight ? 'flex items-start justify-center gap-6' : 'space-y-6'}>
+        <div className="flex items-center justify-center gap-4">
+          <button onClick={()=> prev && setFocusWeek(prev.week)} disabled={!prev} aria-label="Previous week" className={`p-2 rounded-full border border-white/20 text-white/70 hover:text-white hover:bg-white/10 ${!prev? 'opacity-30 cursor-not-allowed':''}`}><ChevronLeft className="w-5 h-5"/></button>
+          {current && <WeekVideo frames={current.frames} title={`Week ${current.week}`} height={videoH}/>}
+          <button onClick={()=> next && setFocusWeek(next.week)} disabled={!next} aria-label="Next week" className={`p-2 rounded-full border border-white/20 text-white/70 hover:text-white hover:bg-white/10 ${!next? 'opacity-30 cursor-not-allowed':''}`}><ChevronRight className="w-5 h-5"/></button>
+        </div>
+        <div
+          className={fitHeight ? 'shrink-0 overflow-y-auto pt-6 pr-1' : 'pt-2'}
+          style={fitHeight && videoH ? { maxHeight: videoH } : undefined}
+        >
+          <div className={fitHeight ? 'grid grid-cols-2 gap-2' : 'flex flex-wrap gap-2 justify-center'}>
           {recentWeeks.map(g=> {
             const b = bundles[g.week];
             const palette = b?.palette?.length ? b.palette : [];
@@ -117,6 +121,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({ frames, fitHeight }) =
               </button>
             );
           })}
+          </div>
         </div>
       </div>
     </div>

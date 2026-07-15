@@ -7,12 +7,13 @@ interface WeekVideoProps {
   autoPlay?: boolean;
   loop?: boolean;
   title?: string;
-  // Desktop: cap the player height (px) so the week picker below it stays on screen. Width
-  // follows from the 9:16 aspect and never exceeds the responsive class width.
-  maxHeight?: number;
+  // Desktop: render the player at exactly this height (px) so it uses the screen instead of
+  // the responsive class width. Width follows from the 9:16 aspect. Omit for natural sizing.
+  // Explicit `| undefined`: exactOptionalPropertyTypes is on, and callers pass the state directly.
+  height?: number | undefined;
 }
 
-export const WeekVideo: React.FC<WeekVideoProps> = ({ frames, fps = 12, autoPlay = true, loop = true, title, maxHeight }) => {
+export const WeekVideo: React.FC<WeekVideoProps> = ({ frames, fps = 12, autoPlay = true, loop = true, title, height }) => {
   const [index,setIndex] = useState(0);
   const timerRef = useRef<number | null>(null);
 
@@ -35,7 +36,7 @@ export const WeekVideo: React.FC<WeekVideoProps> = ({ frames, fps = 12, autoPlay
       {title && <div className="text-white/80 text-xs mb-1">{title}</div>}
   <div
     className="relative aspect-[9/16] bg-black/40 rounded-2xl overflow-hidden border border-white/20 flex items-center justify-center w-[250px] sm:w-[250px] md:w-[270px] lg:w-[300px] xl:w-[340px] transition-shadow shadow-[0_0_0_0_rgba(255,255,255,0.1)] hover:shadow-[0_0_0_3px_rgba(255,255,255,0.15)]"
-    style={maxHeight ? { maxWidth: Math.round(maxHeight * 9 / 16) } : undefined}
+    style={height ? { height, width: 'auto' } : undefined}
   >
         {current && <img src={current.imageData} alt="week frame" className="object-contain max-w-full max-h-full" />}
         {frames.length===0 && <div className="text-white/30 text-xs">No frames</div>}
