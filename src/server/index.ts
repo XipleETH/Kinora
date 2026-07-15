@@ -479,12 +479,12 @@ router.get('/api/showcase-data', async (_req: any, res: any) => {
           const anyRedis: any = redis as any;
           if (typeof anyRedis.del === 'function') { await anyRedis.del(SHOWCASE_WEEK_META_KEY(1)); }
           else { await redis.set(SHOWCASE_WEEK_META_KEY(1), ''); }
-          metaRaw = null;
+          metaRaw = undefined;
         } else {
           return res.json(parsed);
         }
       } catch (e) {
-        metaRaw = null;
+        metaRaw = undefined;
       }
     }
     

@@ -10,8 +10,9 @@ interface CanvasProps {
   isDrawing: boolean;
   setIsDrawing: (drawing: boolean) => void;
   disabled?: boolean;
-  // Único engine actual: mangaPen
-  brushPreset?: BrushPreset; // se usará size/opacity/taper/jitter
+  // Único engine actual: mangaPen. Los `| undefined` explícitos en este bloque son por
+  // exactOptionalPropertyTypes: App reenvía su estado (que puede ser undefined) tal cual.
+  brushPreset?: BrushPreset | undefined; // se usará size/opacity/taper/jitter
   // Active tool selection
   tool?: 'draw' | 'erase' | 'fill';
   // Called once right before a mutating action (stroke start or fill)
@@ -19,17 +20,17 @@ interface CanvasProps {
   // Controlled zoom props (optional). If not provided, the component manages its own zoom internally.
   zoom?: number;
   // Onion skin (previous frame) overlay
-  onionImage?: string;
+  onionImage?: string | undefined;
   onionOpacity?: number; // 0..1
   // Called after a drawing mutation (end of stroke segment / fill) to allow external persistence
   onDirty?: () => void;
   // Optional image (dataURL) to restore onto a freshly mounted/cleared canvas
-  restoreImage?: string | null;
+  restoreImage?: string | null | undefined;
   // Called when a two-finger pinch changes zoom (controlled zoom lives in the parent)
   onZoomChange?: (zoom: number) => void;
   // Desktop only: cap the displayed canvas height (px) so it ends level with the side
   // tool panels. The 9:16 aspect is preserved (width follows).
-  maxHeight?: number;
+  maxHeight?: number | undefined;
   // Live spectator view: when `spectating`, the user is logged in but not the current
   // artist. Show `liveImage` (the artist's in-progress frame) fully over the canvas and
   // replace the dim "login to draw" overlay with a small LIVE chip. Reactive: updating
@@ -42,8 +43,10 @@ interface CanvasProps {
   onSegment?: (seg: {
     from: { x: number; y: number }; to: { x: number; y: number }; ctrl: { x: number; y: number };
     sid: number; erase: boolean; size: number;
-    // draw-only (the spectator feeds these into the shared brush engine):
-    preset?: BrushPreset; color?: string; opacity?: number; spacing?: number; dynamic?: number; velocity?: number;
+    // draw-only (the spectator feeds these into the shared brush engine). Explicit `| undefined`
+    // because exactOptionalPropertyTypes is on and callers forward optional props straight through:
+    preset?: BrushPreset | undefined; color?: string | undefined; opacity?: number | undefined;
+    spacing?: number | undefined; dynamic?: number | undefined; velocity?: number | undefined;
   }) => void;
   // Called after a flood fill (artist only) with LOGICAL coords + color, so the parent can
   // stream the fill to spectators.
@@ -223,16 +226,18 @@ export const Canvas = forwardRef<HTMLCanvasElement, CanvasProps>(({
       const imageData = ctx.getImageData(0, 0, w, h);
       const data = imageData.data; // Uint8ClampedArray
       const idx = (sy * w + sx) * 4;
-      const targetR = data[idx];
-      const targetG = data[idx + 1];
-      const targetB = data[idx + 2];
-      const targetA = data[idx + 3];
+      const targetR = data[idx]!;
+      const targetG = data[idx + 1]!;
+      const targetB = data[idx + 2]!;
+      const targetA = data[idx + 3]!;
 
   const [fillR, fillG, fillB] = hexToRgbTuple(activeColor);
   const opacityMul = Math.max(0, Math.min(1, brushPreset?.opacity ?? 1));
       const near = (a: number, b: number, tol: number) => Math.abs(a - b) <= tol;
       const T = 16; // antialiasing tolerance
-      const matchesTarget = (i: number) => near(data[i], targetR, T) && near(data[i + 1], targetG, T) && near(data[i + 2], targetB, T) && near(data[i + 3], targetA, T);
+      // data is a Uint8ClampedArray indexed within bounds by the scanline walk below; the
+      // assertions keep noUncheckedIndexedAccess from flagging every channel read.
+      const matchesTarget = (i: number) => near(data[i]!, targetR, T) && near(data[i + 1]!, targetG, T) && near(data[i + 2]!, targetB, T) && near(data[i + 3]!, targetA, T);
 
       // Build region mask via scanline flood fill
       const mask = new Uint8Array(w * h);
@@ -291,10 +296,10 @@ export const Canvas = forwardRef<HTMLCanvasElement, CanvasProps>(({
       // Relleno simple monocolor para mangaPen (pixel blending)
       const blendPixel = (di: number, a: number) => {
         const inv = 1 - a;
-        const dr = data[di];
-        const dg = data[di + 1];
-        const db = data[di + 2];
-        const da = data[di + 3] / 255;
+        const dr = data[di]!;
+        const dg = data[di + 1]!;
+        const db = data[di + 2]!;
+        const da = data[di + 3]! / 255;
         const outA = a + da * inv;
         const outR = Math.round(fillR * a + dr * inv);
         const outG = Math.round(fillG * a + dg * inv);
@@ -625,10 +630,9 @@ export const Canvas = forwardRef<HTMLCanvasElement, CanvasProps>(({
         return;
       }
 
-      // Capturar el pointer solo para mouse/pen, nunca para touch (gestión propia de pan)
-      if (e.pointerType !== 'touch') {
-        (e.target as HTMLCanvasElement).setPointerCapture(e.pointerId);
-      }
+      // Capturar el pointer solo para mouse/pen, nunca para touch (gestión propia de pan):
+      // touch ya salió arriba, así que aquí sólo llegan mouse/pen.
+      (e.target as HTMLCanvasElement).setPointerCapture(e.pointerId);
       
       // Clear any previous action
       penActionRef.current = null;
@@ -639,8 +643,9 @@ export const Canvas = forwardRef<HTMLCanvasElement, CanvasProps>(({
   const pos = toLogicalPos(native.offsetX, native.offsetY);
       const buttons = e.buttons;
 
-      // Fill tool: perform on primary click with mouse/pen. Touch remains pan-only by design.
-  if (tool === 'fill' && e.pointerType !== 'touch') {
+      // Fill tool: perform on primary click with mouse/pen. Touch remains pan-only by design
+      // and already returned above.
+  if (tool === 'fill') {
         if ((e.pointerType === 'mouse' && (buttons & 1)) || (e.pointerType === 'pen' && (buttons & 1))) {
       onBeforeMutate?.();
       floodFill(pos.x, pos.y);

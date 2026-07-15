@@ -11,7 +11,7 @@ interface ChatProps {
   side?:'left'|'right';
   onToggleSide?:()=>void;
   /** Match the tools rail height so canvas / tools / chat end level. */
-  maxHeight?:number;
+  maxHeight?:number|undefined;
 }
 
 export const Chat:React.FC<ChatProps> = ({ currentWeek, currentUser, inline, side='left', onToggleSide, maxHeight }) => {

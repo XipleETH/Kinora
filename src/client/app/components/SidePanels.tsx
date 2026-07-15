@@ -89,8 +89,9 @@ interface SidePanelsProps {
   // Brush preset control
   brushPresetId?: string;
   setBrushPresetId?: (id: string) => void;
-  // Allowed brushes gating (winners)
-  allowedBrushIds?: string[];
+  // Allowed brushes gating (winners). Explicit `| undefined`: exactOptionalPropertyTypes is on
+  // and App forwards its state straight through.
+  allowedBrushIds?: string[] | undefined;
 }
 
 const PanelWrapper: React.FC<{
@@ -155,10 +156,14 @@ export const SidePanels: React.FC<SidePanelsProps> = ({
 }) => {
   const move = (key: PanelKey, dir: -1 | 1) => {
     const idx = order.indexOf(key);
+    // Guard the miss: indexOf(-1) + dir 1 passes the bounds check below, and splice(-1, 1)
+    // would then pull the LAST panel out and reinsert it at the front.
+    if (idx < 0) return;
     const target = idx + dir;
     if (target < 0 || target >= order.length) return;
     const newOrder = [...order];
     const [k] = newOrder.splice(idx, 1);
+    if (!k) return;
     newOrder.splice(target, 0, k);
     setOrder(newOrder);
   };

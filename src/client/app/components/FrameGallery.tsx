@@ -6,17 +6,15 @@ interface FrameGalleryProps {
   frames: Frame[];
   pendingFrame?: { imageData: string; startedAt: number } | null;
   initialVotes?: Record<string, { up: number; down: number; my: -1|0|1 }>;
-  activeBrushIds?: string[]; // Weekly active brushes (winners)
   showModeration?: boolean;  // Force show moderation panel (override auto-detect)
   currentWeek?: number;      // so the current week's group shows even with 0 frames
 }
 
-export const FrameGallery: React.FC<FrameGalleryProps> = ({ frames, pendingFrame, initialVotes, activeBrushIds, showModeration, currentWeek }) => {
+export const FrameGallery: React.FC<FrameGalleryProps> = ({ frames, pendingFrame, initialVotes, showModeration, currentWeek }) => {
   const [openWeeks, setOpenWeeks] = useState<Record<number, boolean>>({});
   const [votes, setVotes] = useState<Record<string, { up: number; down: number; my: -1|0|1 }>>({});
   const [isMod, setIsMod] = useState(false);
   const [modFrames, setModFrames] = useState<any[]>([]);
-  const [weekDirectors, setWeekDirectors] = useState<Record<number,string>>({});
   const [fetchingDirectors, setFetchingDirectors] = useState(false);
   // Store resolved winning bundle data (theme + palette + brush names) per week
   const [weekBundles, setWeekBundles] = useState<Record<number,{ theme:string; palette:string[]; brushes:string[]; director?:string }>>({});
@@ -101,7 +99,7 @@ export const FrameGallery: React.FC<FrameGalleryProps> = ({ frames, pendingFrame
   let showPending = false;
   if (pendingFrame) {
     if (frames.length === 0) showPending = true; else {
-      const lastImg = frames[frames.length - 1].imageData.split('?')[0];
+      const lastImg = frames.at(-1)?.imageData.split('?')[0];
       const pendingImg = pendingFrame.imageData.split('?')[0];
       showPending = lastImg !== pendingImg;
     }
@@ -157,7 +155,6 @@ export const FrameGallery: React.FC<FrameGalleryProps> = ({ frames, pendingFrame
         }));
         if (cancel) return;
         const bundles: Record<number,{ theme:string; palette:string[]; brushes:string[]; director?:string }> = {};
-        const directors: Record<number,string> = {};
         for (const res of results) {
           if (!res || !res.bundle) continue;
           const b = res.bundle;
@@ -167,10 +164,8 @@ export const FrameGallery: React.FC<FrameGalleryProps> = ({ frames, pendingFrame
             brushes: Array.isArray(b.brushes) ? b.brushes.slice(0,4) : [],
             director: b.director || undefined,
           };
-          if (b.director) directors[res.week] = b.director;
         }
         if (Object.keys(bundles).length) setWeekBundles(prev=>({ ...prev, ...bundles }));
-        if (Object.keys(directors).length) setWeekDirectors(prev=>({ ...prev, ...directors }));
       } finally { if (!cancel) setFetchingDirectors(false); }
     })();
     return ()=>{ cancel = true; };

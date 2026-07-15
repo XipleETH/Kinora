@@ -61,9 +61,9 @@ export const PaletteVoting: React.FC<PaletteVotingProps> = () => {
       .map(g => g as CombinedSet)
       .sort((a,b)=> (b.theme.votes + b.palette.votes + b.brushes.votes) - (a.theme.votes + a.palette.votes + a.brushes.votes));
     // Persist top winner locally (theme/palette/brushes/director) for App & Gallery consumption
-    if (sets.length) {
+    const top = sets[0];
+    if (top) {
       try {
-        const top = sets[0];
         const paletteColors: string[] = (Array.isArray(top.palette.data)? top.palette.data : top.palette.data?.colors) || [];
         const brushNames: string[] = top.brushes.data?.names || [];
         const payload = {

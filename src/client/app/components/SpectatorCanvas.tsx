@@ -26,7 +26,8 @@ function hexToRgb(hex: string): [number, number, number] {
   return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
 }
 
-type Props = { maxHeight?: number; baseImage?: string | null };
+// Explicit `| undefined`: exactOptionalPropertyTypes is on and App forwards state straight through.
+type Props = { maxHeight?: number | undefined; baseImage?: string | null | undefined };
 
 export const SpectatorCanvas = forwardRef<SpectatorHandle, Props>(({ maxHeight, baseImage }, ref) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);

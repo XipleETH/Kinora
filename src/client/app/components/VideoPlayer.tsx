@@ -19,7 +19,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({ frames, fitHeight }) =
     list.sort((a,b)=>a.week-b.week);
     return list;
   },[frames]);
-  const currentWeek = groups.length? groups[groups.length-1].week : 1;
+  const currentWeek = groups.at(-1)?.week ?? 1;
   const [focusWeek,setFocusWeek] = useState<number>(currentWeek);
   const weekIndex = groups.findIndex(g=>g.week===focusWeek);
   const prev = weekIndex>0? groups[weekIndex-1]: null;

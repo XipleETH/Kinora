@@ -145,12 +145,12 @@ export function paintSegment(
             try {
               const img = ctx.getImageData(Math.round((cx - 1) * SUPERSAMPLE), Math.round((cy - 1) * SUPERSAMPLE), 2 * SUPERSAMPLE, 2 * SUPERSAMPLE);
               const d = img.data; let c = 0;
-              for (let i = 0; i < d.length; i += 4) { blendR += d[i]; blendG += d[i+1]; blendB += d[i+2]; c++; }
+              for (let i = 0; i < d.length; i += 4) { blendR += d[i]!; blendG += d[i+1]!; blendB += d[i+2]!; c++; }
               if (c) { blendR/=c; blendG/=c; blendB/=c; }
             } catch {}
           }
           for (let b = 0; b < bristles; b++) {
-            const off = offsets[b];
+            const off = offsets[b]!;
             const ox = cx + nx * off + (Math.random() - 0.5) * texNoise * 0.6;
             const oy = cy + ny * off + (Math.random() - 0.5) * texNoise * 0.6;
             // Local thickness varies with simulated pressure and bristle index
@@ -422,7 +422,7 @@ export function paintSegment(
             const img = ctx.getImageData(Math.max(0, Math.round((x - sampleSize / 2) * SUPERSAMPLE)), Math.max(0, Math.round((y - sampleSize / 2) * SUPERSAMPLE)), dev, dev);
             const d = img.data;
             let r = 0, g = 0, b = 0, c = 0;
-            for (let p = 0; p < d.length; p += 4) { r += d[p]; g += d[p + 1]; b += d[p + 2]; c++; }
+            for (let p = 0; p < d.length; p += 4) { r += d[p]!; g += d[p + 1]!; b += d[p + 2]!; c++; }
             if (c > 0) {
               r /= c; g /= c; b /= c;
               const sr = parseInt(color.slice(1, 3), 16);

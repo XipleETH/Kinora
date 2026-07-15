@@ -44,20 +44,9 @@ function App() {
   const [isEmbedded, setIsEmbedded] = useState<boolean>(() => {
     try { return typeof window !== 'undefined' && window.self !== window.top; } catch { return false; }
   });
-  const [embedContext, setEmbedContext] = useState<string>('');
-
   useEffect(() => {
     try {
-      const embedded = window.self !== window.top;
-      setIsEmbedded(embedded);
-      if (embedded) {
-        try {
-          const parentUrl = document.referrer || '';
-          if (parentUrl.includes('reddit.com')) setEmbedContext('reddit'); else setEmbedContext('iframe');
-        } catch { setEmbedContext('iframe'); }
-      } else {
-        setEmbedContext('');
-      }
+      setIsEmbedded(window.self !== window.top);
     } catch {}
   }, []);
 
@@ -196,9 +185,8 @@ function App() {
 
   // Auto-hydrate latest frame image so onion-skin and spectators show the newest image even if meta omitted url
   const hydrateLatestFrameIfNeeded = useCallback(async (list: Frame[]) => {
-    if (!list.length) return list;
-    const last = list[list.length - 1];
-    if (!last.key) return list;
+    const last = list.at(-1);
+    if (!last?.key) return list;
     // If any usable image src is present (data URL or stable /api/frame path), don't fetch again
     if (last.imageData) return list;
     // If we have cached hydration, apply it
@@ -273,7 +261,8 @@ function App() {
     ['#E17055', '#FDCB6E', '#6C5CE7', '#A29BFE', '#FD79A8', '#E84393'],
     ['#00CEC9', '#55A3FF', '#FDCB6E', '#E17055', '#A29BFE', '#FD79A8']
   ];
-  const currentPalette = paletteColors && paletteColors.length ? paletteColors : weeklyPalettes[currentWeek % weeklyPalettes.length];
+  // The modulo keeps the index in range of the literal list above, hence the assertion.
+  const currentPalette = paletteColors && paletteColors.length ? paletteColors : weeklyPalettes[currentWeek % weeklyPalettes.length]!;
   // No currentPreset while brushes are disabled
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -476,8 +465,10 @@ function App() {
           const changed = !prev || prev.length !== colors.length || prev.some((c, i) => c !== colors[i]);
           // If activeColor not in new palette, switch to the first
           if (changed) {
-            if (!colors.includes(activeColor)) {
-              setActiveColor(colors[0]);
+            const first = colors[0];
+            // An empty palette would otherwise set the colour to undefined.
+            if (first && !colors.includes(activeColor)) {
+              setActiveColor(first);
             }
           }
           return colors;
@@ -495,9 +486,11 @@ function App() {
           setAllowedBrushIds(prev => {
             const changed = !prev || prev.length !== normalized.length || prev.some((id, i) => id !== normalized[i]);
             if (changed) {
-              if (!normalized.includes(brushPresetId)) {
-                setBrushPresetId(normalized[0]);
-                const preset = allBrushPresets.find(p => p.id === normalized[0]);
+              const firstId = normalized[0];
+              // An empty brush list would otherwise set the preset id to undefined.
+              if (firstId && !normalized.includes(brushPresetId)) {
+                setBrushPresetId(firstId);
+                const preset = allBrushPresets.find(p => p.id === firstId);
                 if (preset) setBrushSize(preset.size);
               }
             }
@@ -849,7 +842,8 @@ function App() {
     if (!canvasRef.current || undoStack.length === 0) return;
     const ctx = canvasRef.current.getContext('2d');
     if (!ctx) return;
-    const prev = undoStack[undoStack.length - 1];
+    const prev = undoStack.at(-1);
+    if (!prev) return;
     setUndoStack(undoStack.slice(0, -1));
     ctx.putImageData(prev, 0, 0);
     // Reconcile spectators to the undone state via an immediate keyframe (the already-sent
@@ -1043,7 +1037,7 @@ function App() {
                     />
                     ) : (
                     <Canvas
-                      key={`canvas-${turnInfo?.currentArtist || 'none'}-${frames.length ? frames[frames.length-1].key : 'empty'}-${resumeNonce}`}
+                      key={`canvas-${turnInfo?.currentArtist || 'none'}-${frames.at(-1)?.key ?? 'empty'}-${resumeNonce}`}
                       ref={canvasRef}
                       activeColor={activeColor}
                       brushSize={brushSize}
