@@ -11,7 +11,13 @@ import { VideoPlayer } from './components/VideoPlayer';
 import { PaletteVoting } from './components/PaletteVoting';
 import { Chat } from './components/Chat'; // <-- Import Chat component
 // Header removed: navigation moved into SidePanels
-import { ZoomIn, ZoomOut, PencilRuler, X, Palette, Play, Image as ImgIcon, Vote, MessageCircle } from 'lucide-react';
+import { ZoomIn, ZoomOut, PencilRuler, X, Palette, Play, Image as ImgIcon, Vote, MessageCircle, MessageCircleOff } from 'lucide-react';
+
+// Inline chat column geometry, kept in sync with chatInlineNode's min/max classes. The column
+// grows into whatever the draw row has left over, so a ~1024px iPad in desktop mode still gets a
+// chat; under CHAT_MIN_WIDTH there is no room for one. COLUMN_GAP mirrors the row's md:gap-4.
+const CHAT_MIN_WIDTH = 210;
+const COLUMN_GAP = 16;
 
 // Simple onion icon (layered rings) replacing Layers icon
 const OnionIcon: React.FC<{ className?: string }> = ({ className }) => (
@@ -77,6 +83,8 @@ function App() {
   const [sessionStartTs, setSessionStartTs] = useState<number | null>(null); // when current artist window started
   const [currentWeek,setCurrentWeek] = useState<number>(1);
   const [paletteSide, setPaletteSide] = useState<'left' | 'right'>('right');
+  // Inline chat sits opposite the tools rail by default.
+  const [chatSide, setChatSide] = useState<'left' | 'right'>('left');
   // Brush system disabled (presets & styles removed)
   const [panelsOrder, setPanelsOrder] = useState<PanelKey[]>(['actions','tools','brushSize','brushMode','palette']);
   const [tool, setTool] = useState<'draw' | 'erase' | 'fill'>('draw');
@@ -95,18 +103,46 @@ function App() {
     try { mq.addEventListener('change', on); } catch { (mq as any).addListener(on); }
     return () => { try { mq.removeEventListener('change', on); } catch { (mq as any).removeListener(on); } };
   }, []);
-  // Measure the desktop side-panels height so the canvas can end level with them.
+  // Inline chat auto-shows only when the draw row has real room left over for it. Measured
+  // rather than keyed off a breakpoint: the Reddit frame, fullscreen and iPad desktop mode all
+  // report widths that a fixed min-width guesses wrong. `chatOverride` lets the user win.
+  const drawRowRef = useRef<HTMLDivElement | null>(null);
+  const [chatFits, setChatFits] = useState<boolean>(false);
+  const [chatOverride, setChatOverride] = useState<boolean | null>(null);
+  // Fit the desktop side-panels rail to the viewport, then let the canvas match it.
+  // The canvas caps its own height to the viewport (see Canvas.tsx), but the rail's height is
+  // content-driven, so a rail taller than the screen would hang past the canvas and clip the
+  // palette — which is what browser zoom and short iPad viewports used to do. Scale it down to
+  // fit instead; `panelsHeight` is then the on-screen height both canvas and chat line up with.
   const sidePanelsRef = useRef<HTMLDivElement>(null);
+  const sidePanelsInnerRef = useRef<HTMLDivElement>(null);
   const [panelsHeight, setPanelsHeight] = useState<number | undefined>(undefined);
+  const [panelsScale, setPanelsScale] = useState<number>(1);
+  const [panelsWidth, setPanelsWidth] = useState<number | undefined>(undefined);
   useEffect(() => {
-    if (isMobile) { setPanelsHeight(undefined); return; }
-    const el = sidePanelsRef.current;
-    if (!el || typeof ResizeObserver === 'undefined') return;
-    const update = () => setPanelsHeight(el.getBoundingClientRect().height || undefined);
+    if (isMobile) { setPanelsHeight(undefined); setPanelsScale(1); setPanelsWidth(undefined); return; }
+    const wrap = sidePanelsRef.current;
+    const inner = sidePanelsInnerRef.current;
+    if (!wrap || !inner || typeof ResizeObserver === 'undefined') return;
+    const update = () => {
+      // offsetHeight is the layout size, so it ignores the scale we apply below and can't feed back.
+      const naturalH = inner.offsetHeight;
+      const naturalW = inner.offsetWidth;
+      if (!naturalH) return;
+      const top = wrap.getBoundingClientRect().top;
+      const availH = Math.max(160, window.innerHeight - top - 12); // mirrors Canvas.tsx
+      const s = Math.min(1, availH / naturalH);
+      setPanelsScale(s);
+      setPanelsHeight(naturalH * s);
+      setPanelsWidth(naturalW * s);
+    };
     update();
     const ro = new ResizeObserver(update);
-    ro.observe(el);
-    return () => ro.disconnect();
+    ro.observe(inner);
+    // The rail's own size doesn't change when the window gets shorter, so the observer alone
+    // would never see a viewport-only resize.
+    window.addEventListener('resize', update);
+    return () => { ro.disconnect(); window.removeEventListener('resize', update); };
   }, [isMobile]);
   // Dynamic weekly tools from backend
   const [allowedBrushIds, setAllowedBrushIds] = useState<string[] | undefined>(undefined);
@@ -196,6 +232,28 @@ function App() {
     return () => window.clearInterval(interval);
   }, [fetchAllFramesMeta, hydrateLatestFrameIfNeeded]);
   const canvasCardRef = useRef<HTMLDivElement | null>(null);
+  // How much room does the draw row have left beside canvas + tools? Remeasured on any of the
+  // three resizing. None of the measured widths depend on the chat being mounted, so showing it
+  // can't feed back and flip this.
+  useEffect(() => {
+    if (isMobile || currentView !== 'draw') { setChatFits(false); return; }
+    const row = drawRowRef.current;
+    if (!row || typeof ResizeObserver === 'undefined') return;
+    const update = () => {
+      const rowW = row.getBoundingClientRect().width;
+      const canvasW = canvasCardRef.current?.getBoundingClientRect().width ?? 0;
+      const toolsW = sidePanelsRef.current?.getBoundingClientRect().width ?? 0;
+      setChatFits(rowW - canvasW - toolsW - COLUMN_GAP >= CHAT_MIN_WIDTH);
+    };
+    update();
+    const ro = new ResizeObserver(update);
+    ro.observe(row);
+    if (canvasCardRef.current) ro.observe(canvasCardRef.current);
+    if (sidePanelsRef.current) ro.observe(sidePanelsRef.current);
+    return () => ro.disconnect();
+    // panelsHeight drives the canvas size, so remeasure when it lands rather than waiting on
+    // the observer — the first pass runs before the canvas has settled.
+  }, [isMobile, currentView, panelsHeight]);
   // Turn-based state
   const [currentUser, setCurrentUser] = useState<string>('anonymous');
   const [turnInfo, setTurnInfo] = useState<any>(null);
@@ -849,6 +907,85 @@ function App() {
     />
   );
 
+  // Draw-view columns. Each carries a flex `order` instead of being re-parented, so flipping
+  // a side is pure CSS and never remounts the column (the chat would drop its state otherwise).
+  // Desktop inline tools rail — on mobile the tools live in the right drawer.
+  // shrink-0 + justify-center keeps the panels hugging the (narrow portrait) canvas.
+  const toolsRailNode = !isMobile ? (
+    <div
+      ref={sidePanelsRef}
+      className="shrink-0"
+      style={{ order: paletteSide === 'left' ? -1 : 1, width: panelsWidth, height: panelsHeight }}
+    >
+      <div ref={sidePanelsInnerRef} className="w-max" style={{ transform: `scale(${panelsScale})`, transformOrigin: 'top left' }}>
+        {sidePanelsNode}
+      </div>
+    </div>
+  ) : null;
+  // Inline chat: desktop only. Auto when it fits, but an explicit show/hide always wins.
+  const showChat = !isMobile && (chatOverride ?? chatFits);
+  // Width is left to flexbox (grow into the leftover, clamped): CSS tracks the real space
+  // continuously, where a measured pixel width would go stale between resizes.
+  const chatInlineNode = showChat ? (
+    <div className="flex-1 min-w-[210px] max-w-[288px]" style={{ order: chatSide === 'left' ? -2 : 2 }}>
+      <Chat
+        currentWeek={currentWeek}
+        currentUser={currentUser}
+        inline
+        side={chatSide}
+        onToggleSide={() => setChatSide(s => s === 'right' ? 'left' : 'right')}
+        maxHeight={panelsHeight}
+      />
+    </div>
+  ) : null;
+
+  // Zoom / onion / chat-toggle rail that sits between the canvas and the tools panels.
+  const zoomRailNode = (
+    <div className="flex flex-col gap-2 pt-2">
+      <div className="sketch-border panel-hatch rounded-2xl p-3 flex flex-col items-center gap-3 select-none">
+        <div className="flex flex-col items-center gap-1">
+          <ZoomIn className="w-4 h-4 text-white/70" />
+          <input
+            type="range"
+            min={100}
+            max={400}
+            value={zoom*100}
+            onChange={(e) => setZoom(parseInt(e.target.value,10)/100)}
+            aria-label="Zoom level"
+            className="h-36 accent-white/80 cursor-pointer rotate-180"
+            style={{ writingMode: 'vertical-rl' as any }}
+          />
+          <ZoomOut className="w-4 h-4 text-white/70" />
+        </div>
+        <div className="flex flex-col items-center gap-1">
+          <OnionIcon className="w-4 h-4 text-white/70" />
+          <input
+            type="range"
+            min={0}
+            max={100}
+            value={Math.round(onionOpacity*100)}
+            onChange={(e) => (turnInfo && turnInfo.currentArtist === currentUser) ? setOnionOpacity(parseInt(e.target.value,10)/100) : undefined}
+            disabled={!(turnInfo && turnInfo.currentArtist === currentUser) || !frames.length}
+            aria-label="Onion opacity"
+            className="h-28 accent-white/70 cursor-pointer rotate-180"
+            style={{ writingMode: 'vertical-rl' as any }}
+          />
+        </div>
+        <div className="flex flex-col items-center gap-1 border-t-2 border-black/30 pt-2 w-full">
+          <button
+            onClick={() => setChatOverride(!showChat)}
+            aria-label={showChat ? 'Hide chat' : 'Show chat'}
+            title={showChat ? 'Hide chat' : 'Show chat'}
+            className="p-1.5 rounded-full pencil-btn transition"
+          >
+            {showChat ? <MessageCircleOff className="w-4 h-4" /> : <MessageCircle className="w-4 h-4" />}
+          </button>
+          <span className="text-[8px] leading-none tracking-tight text-black/75 select-none">Chat</span>
+        </div>
+      </div>
+    </div>
+  );
+
   // Compact bottom navigation for mobile (replaces the hidden 60px left rail).
   const mobileNav = ([
     { key: 'draw', label: 'Draw', Icon: Palette },
@@ -885,54 +1022,18 @@ function App() {
   {/* Reddit banner removed */}
       
   <Header currentView={currentView} setCurrentView={setCurrentView} />
-  <div className={currentView === 'draw' ? 'w-full md:pl-[68px] px-1 md:pr-3 pb-4' : 'max-w-6xl mx-auto px-3 pb-4'}>
+  {/* No left padding for the fixed nav rail here: body already reserves its 60px (index.css),
+      and padding it twice cost ~68px that the chat column needs on narrower desktops/iPads. */}
+  <div className={currentView === 'draw' ? 'w-full px-1 md:pr-3 pb-4' : 'max-w-6xl mx-auto px-3 pb-4'}>
         {/* Turn / Lobby banner */}
   {/* Removed top status banner (User / Artist / Ends in) */}
         {currentView === 'draw' && (
-          <div className={`w-full flex items-start justify-center gap-2 md:gap-4 ${paletteSide === 'left' ? 'flex-row' : 'flex-row-reverse'}`}>
-            {/* Desktop inline tools rail — on mobile the tools live in the right drawer.
-                shrink-0 + justify-center keeps the panels hugging the (narrow portrait) canvas. */}
-            {!isMobile && (
-              <div ref={sidePanelsRef} className="shrink-0">
-                {sidePanelsNode}
-              </div>
-            )}
-            <div ref={canvasCardRef} className="shrink-0">
+          <div ref={drawRowRef} className="w-full flex flex-row items-start justify-center gap-2 md:gap-4">
+            {chatInlineNode}
+            {toolsRailNode}
+            <div ref={canvasCardRef} className="shrink-0" style={{ order: 0 }}>
               <div className="flex items-start gap-2 md:gap-4">
-                {!isMobile && paletteSide === 'right' && (
-                  <div className="flex flex-col gap-2 pt-2">
-                    <div className="sketch-border panel-hatch rounded-2xl p-3 flex flex-col items-center gap-3 select-none">
-                      <div className="flex flex-col items-center gap-1">
-                        <ZoomIn className="w-4 h-4 text-white/70" />
-                        <input
-                          type="range"
-                          min={100}
-                          max={400}
-                          value={zoom*100}
-                          onChange={(e) => setZoom(parseInt(e.target.value,10)/100)}
-                          aria-label="Zoom level"
-                          className="h-36 accent-white/80 cursor-pointer rotate-180"
-                          style={{ writingMode: 'vertical-rl' as any }}
-                        />
-                        <ZoomOut className="w-4 h-4 text-white/70" />
-                      </div>
-                      <div className="flex flex-col items-center gap-1">
-                        <OnionIcon className="w-4 h-4 text-white/70" />
-                        <input
-                          type="range"
-                          min={0}
-                          max={100}
-                          value={Math.round(onionOpacity*100)}
-                          onChange={(e) => (turnInfo && turnInfo.currentArtist === currentUser) ? setOnionOpacity(parseInt(e.target.value,10)/100) : undefined}
-                          disabled={!(turnInfo && turnInfo.currentArtist === currentUser) || !frames.length}
-                          aria-label="Onion opacity"
-                          className="h-28 accent-white/70 cursor-pointer rotate-180"
-                          style={{ writingMode: 'vertical-rl' as any }}
-                        />
-                      </div>
-                    </div>
-                  </div>
-                )}
+                {!isMobile && paletteSide === 'right' && zoomRailNode}
                 <div className="flex justify-center">
                     {isSpectating ? (
                     <SpectatorCanvas
@@ -970,40 +1071,7 @@ function App() {
                     />
                     )}
                 </div>
-                {!isMobile && paletteSide === 'left' && (
-                  <div className="flex flex-col gap-2 pt-2">
-                    <div className="sketch-border panel-hatch rounded-2xl p-3 flex flex-col items-center gap-3 select-none">
-                      <div className="flex flex-col items-center gap-1">
-                        <ZoomIn className="w-4 h-4 text-white/70" />
-                        <input
-                          type="range"
-                          min={100}
-                          max={400}
-                          value={zoom*100}
-                          onChange={(e) => setZoom(parseInt(e.target.value,10)/100)}
-                          aria-label="Zoom level"
-                          className="h-36 accent-white/80 cursor-pointer rotate-180"
-                          style={{ writingMode: 'vertical-rl' as any }}
-                        />
-                        <ZoomOut className="w-4 h-4 text-white/70" />
-                      </div>
-                      <div className="flex flex-col items-center gap-1">
-                        <OnionIcon className="w-4 h-4 text-white/70" />
-                        <input
-                          type="range"
-                          min={0}
-                          max={100}
-                          value={Math.round(onionOpacity*100)}
-                          onChange={(e) => (turnInfo && turnInfo.currentArtist === currentUser) ? setOnionOpacity(parseInt(e.target.value,10)/100) : undefined}
-                          disabled={!(turnInfo && turnInfo.currentArtist === currentUser) || !frames.length}
-                          aria-label="Onion opacity"
-                          className="h-28 accent-white/70 cursor-pointer rotate-180"
-                          style={{ writingMode: 'vertical-rl' as any }}
-                        />
-                      </div>
-                    </div>
-                  </div>
-                )}
+                {!isMobile && paletteSide === 'left' && zoomRailNode}
               </div>
             </div>
           </div>
