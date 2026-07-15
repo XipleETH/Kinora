@@ -10,10 +10,9 @@
 //    ballot proposal and the never-empty safety-net winner perfectly in sync.
 //  - Director: the house account ("kinora-app").
 //
-// Only kicks in when NO human proposed a theme for the week ("solo si nadie
-// propone tema"): the house bundle is seeded with a single vote, so any human
-// bundle that reaches an equal vote count overtakes it (see house tie-break in
-// pickWinner in index.ts).
+// The house bundle is seeded onto the ballot with a single vote and is votable
+// like any human pitch. It loses vote ties to human bundles (see house tie-break
+// in pickWinner in index.ts), so an equal vote count always goes to the humans.
 // -----------------------------------------------------------------------------
 
 export const HOUSE_DIRECTOR = 'kinora-app';

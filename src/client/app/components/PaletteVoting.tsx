@@ -151,7 +151,7 @@ export const PaletteVoting: React.FC<PaletteVotingProps> = () => {
     <div className="paper-shell pencil-theme px-4 py-6 mx-auto max-w-6xl">
       <div className="space-y-10">
         <section className="sketch-border rounded-2xl p-6 bg-[#FFF9EE] shadow-[4px_4px_0_0_#000]">
-          <h3 className="text-2xl font-bold text-black mb-4">Create weekly bundle</h3>
+          <h3 className="text-2xl font-bold text-black mb-4">Submit a pitch</h3>
           <div className="flex flex-col gap-6">
             <div className="flex flex-col gap-2">
               <span className="text-[11px] font-bold uppercase tracking-wide text-black/50">Select — step {wizardStep} of 3</span>
@@ -166,10 +166,17 @@ export const PaletteVoting: React.FC<PaletteVotingProps> = () => {
                       onClick={()=>{ if(n<=wizardStep) setWizardStep(n); }}
                       disabled={n>wizardStep}
                       aria-current={active ? 'step' : undefined}
-                      style={{ backgroundColor: active ? '#FDE047' : done ? '#A7F3D0' : '#FFFFFF' }}
+                      // Active inverts to ink like every other selected control; done stays
+                      // green because it reads as completed, not as the current step.
+                      style={active ? { backgroundColor: 'var(--ink)', color: 'var(--paper-bg)' } : { backgroundColor: done ? '#A7F3D0' : '#FFFFFF' }}
                       className={`sketch-border flex items-center gap-1.5 px-2.5 py-1.5 rounded-md text-xs font-bold transition ${n>wizardStep?'opacity-50 cursor-not-allowed':'cursor-pointer'}`}
                     >
-                      <span style={{ backgroundColor: active ? '#000000' : done ? '#34D399' : '#FFFFFF', color: active ? '#FFFFFF' : '#000000' }} className="w-5 h-5 rounded-full flex items-center justify-center text-[10px] border-2 border-black">{done?'✓':n}</span>
+                      <span
+                        style={active
+                          ? { backgroundColor: 'var(--paper-bg)', color: 'var(--ink)', borderColor: 'var(--paper-bg)' }
+                          : { backgroundColor: done ? '#34D399' : '#FFFFFF', color: '#000000' }}
+                        className="w-5 h-5 rounded-full flex items-center justify-center text-[10px] border-2 border-black"
+                      >{done?'✓':n}</span>
                       <span>{name}</span>
                     </button>
                   );
@@ -196,7 +203,7 @@ export const PaletteVoting: React.FC<PaletteVotingProps> = () => {
                       onClick={()=>setActivePaletteIndex(i)}
                       aria-label={`Color slot ${i+1}`}
                       className="w-11 h-11 rounded-lg sketch-border cursor-pointer"
-                      style={{ background:c, outline: activePaletteIndex===i ? '3px solid #FDE047' : 'none', outlineOffset:'2px' }}
+                      style={{ background:c, outline: activePaletteIndex===i ? '3px solid var(--ink)' : 'none', outlineOffset:'2px' }}
                     />
                   ))}
                 </div>
@@ -208,9 +215,9 @@ export const PaletteVoting: React.FC<PaletteVotingProps> = () => {
                   />
                 </div>
                 <div className="flex justify-between items-center">
-                  <button onClick={()=>setWizardStep(1)} className="sketch-border px-4 py-2 rounded-md bg-white text-black hover:bg-yellow-100 text-sm font-semibold">Back</button>
+                  <button onClick={()=>setWizardStep(1)} className="sketch-border px-4 py-2 rounded-md bg-white text-black hover:bg-black/5 text-sm font-semibold">Back</button>
                   <div className="flex gap-2">
-                    <button onClick={()=>setWizPaletteColors(['#FF6B6B','#4ECDC4','#45B7D1','#96CEB4','#FFEAA7','#DDA0DD'])} className="sketch-border px-4 py-2 rounded-md bg-white text-black hover:bg-yellow-100 text-xs">Reset</button>
+                    <button onClick={()=>setWizPaletteColors(['#FF6B6B','#4ECDC4','#45B7D1','#96CEB4','#FFEAA7','#DDA0DD'])} className="sketch-border px-4 py-2 rounded-md bg-white text-black hover:bg-black/5 text-xs">Reset</button>
                     <button disabled={!wizValidPalette} onClick={()=>setWizardStep(3)} className={`sketch-border px-5 py-2 rounded-lg font-bold ${wizValidPalette? 'bg-emerald-300 hover:bg-emerald-400':'bg-gray-200 text-gray-400 cursor-not-allowed'}`}>Next</button>
                   </div>
                 </div>
@@ -230,32 +237,33 @@ export const PaletteVoting: React.FC<PaletteVotingProps> = () => {
                         disabled={disabled}
                         onClick={()=>toggleWizBrush(b.id)}
                         aria-pressed={checked}
-                        style={{ backgroundColor: checked ? '#FDE047' : undefined }}
+                        style={checked ? { backgroundColor: 'var(--ink)', color: 'var(--paper-bg)' } : undefined}
                         className={`sketch-border rounded-lg p-2 flex flex-col items-center gap-1.5 ${disabled?'opacity-40 cursor-not-allowed':'cursor-pointer'}`}
                       >
-                        <BrushPreview preset={b} />
-                        <span className="text-[11px] font-bold text-black text-center leading-tight">{b.name}</span>
-                        {checked && <span className="text-[9px] font-bold text-black/70">✓ selected</span>}
+                        {/* The sample stroke has to invert too, or it vanishes into the ink fill. */}
+                        <BrushPreview preset={b} color={checked ? '#FAF3E0' : '#1b1b1b'} />
+                        <span className={`text-[11px] font-bold text-center leading-tight ${checked ? '' : 'text-black'}`}>{b.name}</span>
+                        {checked && <span className="text-[9px] font-bold opacity-80">✓ selected</span>}
                       </button>
                     );
                   })}
                 </div>
                 <div className="flex justify-between items-center">
-                  <button onClick={()=>setWizardStep(2)} className="sketch-border px-4 py-2 rounded-md bg-white text-black hover:bg-yellow-100 text-sm font-semibold">Back</button>
+                  <button onClick={()=>setWizardStep(2)} className="sketch-border px-4 py-2 rounded-md bg-white text-black hover:bg-black/5 text-sm font-semibold">Back</button>
                   <div className="flex gap-2">
-                    <button onClick={resetWizard} className="sketch-border px-4 py-2 rounded-md bg-white text-black hover:bg-yellow-100 text-xs">Reset</button>
+                    <button onClick={resetWizard} className="sketch-border px-4 py-2 rounded-md bg-white text-black hover:bg-black/5 text-xs">Reset</button>
                     <button disabled={!wizardComplete || submitting || !currentUser} onClick={submitCombined} className={`sketch-border px-5 py-2 rounded-lg font-bold ${wizardComplete && !submitting && currentUser? 'bg-emerald-300 hover:bg-emerald-400':'bg-gray-200 text-gray-400 cursor-not-allowed'}`}>{submitting? 'Creating...' : 'Publish bundle'}</button>
                   </div>
                 </div>
-                {!currentUser && <div className="sketch-border p-3 rounded-md bg-yellow-100 text-black text-xs font-semibold">You must log in to publish a bundle.</div>}
+                {!currentUser && <div className="sketch-border p-3 rounded-md bg-[#FAF3E0] text-black text-xs font-semibold">You must log in to publish a pitch.</div>}
               </div>
             )}
           </div>
         </section>
         <section>
-          <h3 className="text-2xl font-bold text-black mb-4">Proposed bundles</h3>
+          <h3 className="text-2xl font-bold text-black mb-4">Vote on pitches</h3>
           {combinedSets.length===0 ? (
-            <div className="text-center py-10 text-black/60 text-sm sketch-border rounded-xl bg-white">No complete bundles yet.</div>
+            <div className="text-center py-10 text-black/60 text-sm sketch-border rounded-xl bg-white">No complete pitches yet.</div>
           ) : (
             <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-8">
               {combinedSets.map(setObj=>{
@@ -263,34 +271,45 @@ export const PaletteVoting: React.FC<PaletteVotingProps> = () => {
                 const isHouse = setObj.theme.data?.house === true || setObj.theme.proposedBy === 'kinora-app';
                 const alreadyAll = hasUserVoted(setObj.theme) && hasUserVoted(setObj.palette) && hasUserVoted(setObj.brushes);
                 const paletteColors: string[] = (Array.isArray(setObj.palette.data)? setObj.palette.data : setObj.palette.data?.colors) || [];
+                // Show how each brush actually paints, not just its name. Both wizard and
+                // house proposals carry ids; fall back to matching on name if one doesn't.
                 const brushNames: string[] = (setObj.brushes.data?.names || []);
+                const brushIds: string[] = (setObj.brushes.data?.ids || []);
+                const brushKit = brushNames.map((name, i) => ({
+                  name,
+                  preset: allBrushPresets.find(p => p.id === brushIds[i]) || allBrushPresets.find(p => p.name === name),
+                }));
                 return (
                   <div key={setObj.groupId} className={`sketch-border rounded-2xl p-5 shadow-[4px_4px_0_0_#000] flex flex-col gap-4 ${isHouse? 'bg-[#FFF9EE]':'bg-white'}`}>
                     <div className="flex items-start justify-between gap-2">
                       <div>
                         <div className="flex items-center gap-2 mb-1">
                           <h4 className="text-lg font-bold text-black">{setObj.theme.title}</h4>
-                          {isHouse && <span className="px-2 py-0.5 rounded-full bg-yellow-200 sketch-border text-[10px] font-bold text-black uppercase tracking-wide">Default</span>}
+                          {isHouse && <span style={{ backgroundColor: 'var(--ink)', color: 'var(--paper-bg)' }} className="px-2 py-0.5 rounded-full sketch-border text-[10px] font-bold uppercase tracking-wide">Default</span>}
                         </div>
                         <div className="text-[11px] font-semibold text-black/70 mb-1">Director: <span className="text-black">u/{setObj.theme.proposedBy}</span></div>
                         <div className="flex items-center gap-2 flex-wrap mb-2">
                           {paletteColors.slice(0,6).map((c,i)=>(<span key={i} className="w-5 h-5 rounded-sm sketch-border-inner" style={{background:c}} />))}
                         </div>
                         <div className="flex flex-wrap gap-1.5">
-                          {brushNames.map((n,i)=>(<span key={i} className="px-2 py-0.5 rounded-full bg-[#FAF3E0] sketch-border text-[11px] font-semibold text-black/80">{n}</span>))}
+                          {brushKit.map(({ name, preset }, i)=>(
+                            <span key={i} className="flex items-center gap-1 pl-1 pr-2 py-0.5 rounded-full bg-[#FAF3E0] sketch-border text-[11px] font-semibold text-black/80">
+                              {preset && <BrushPreview preset={preset} width={30} height={14} />}
+                              {name}
+                            </span>
+                          ))}
                         </div>
                       </div>
                       <div className="flex items-center gap-2 font-bold text-black"><span className="text-sm">Votes:</span><span className="text-xl">{totalVotes}</span></div>
                     </div>
-                    {isHouse ? (
-                      <div className="sketch-border w-full text-center py-3 px-4 rounded-lg font-semibold bg-[#FAF3E0] text-black/70 text-sm">
-                        Weekly default — wins if no bundle gets more votes. Propose your own to override.
-                      </div>
-                    ) : (
-                      <button onClick={()=>voteCombined(setObj)} disabled={!currentUser || alreadyAll} className={`sketch-border w-full flex items-center justify-center gap-2 py-3 px-4 rounded-lg font-bold transition-all ${alreadyAll? 'bg-emerald-300 cursor-default':'bg-yellow-200 hover:bg-yellow-300'} ${!currentUser? 'opacity-50 cursor-not-allowed':''}`}>
-                        <span>{alreadyAll? 'Voted!' : 'Vote bundle (x3)'}</span>
-                      </button>
-                    )}
+                    <button
+                      onClick={()=>voteCombined(setObj)}
+                      disabled={!currentUser || alreadyAll}
+                      style={alreadyAll ? undefined : { backgroundColor: 'var(--ink)', color: 'var(--paper-bg)' }}
+                      className={`sketch-border w-full flex items-center justify-center gap-2 py-3 px-4 rounded-lg font-bold transition-all ${alreadyAll? 'bg-emerald-300 cursor-default':'hover:opacity-85'} ${!currentUser? 'opacity-50 cursor-not-allowed':''}`}
+                    >
+                      <span>{alreadyAll? 'Voted!' : 'Vote'}</span>
+                    </button>
                   </div>
                 );
               })}

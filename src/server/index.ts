@@ -109,10 +109,10 @@ async function ensureWeekSeeded(postId: string, week: number): Promise<void> {
     const key = WEEK_PROPOSALS_KEY(postId, week);
     const raw = await redis.get(key);
     const proposals: any[] = raw ? JSON.parse(raw) : [];
-    // Always seed the house floor once per week — a COMPLETE, votable bundle — so the
-    // ballot is never empty, regardless of any partial/lone human proposals. The house
-    // loses vote ties to humans (pickWinner) and its vote cannot be stacked (see the
-    // proposal vote endpoint), so it only wins when unopposed.
+    // Always seed the house pitch once per week — a COMPLETE, votable bundle — so the
+    // ballot is never empty, regardless of any partial/lone human proposals. Users can
+    // vote for it like any other pitch; it loses vote ties to humans (pickWinner), so it
+    // wins only when unopposed or genuinely ahead.
     if (!proposalsHaveHouse(proposals)) {
       const bounds = await getAccurateWeekBoundaries(week);
       const proposedAt = bounds.startMs || (await nowMs());
@@ -1806,11 +1806,9 @@ router.post('/api/proposals/:id/vote', async (req,res)=>{
     const proposalsStr = await redis.get(WEEK_PROPOSALS_KEY(postId, week));
     const proposals = proposalsStr ? JSON.parse(proposalsStr) : [];
     const proposal = proposals.find((p:any)=>p.id===proposalId); if(!proposal) return res.status(404).json({ error:'proposal not found' });
-    // The house default is a fixed floor (1 vote) that must lose ties to humans; do not
-    // let real votes stack on it, or it would win genuine ties. Endorse by doing nothing.
-    if (proposal.house === true || (typeof proposal.id === 'string' && proposal.id.startsWith('house_'))) {
-      return res.status(403).json({ error: 'house-default', message: 'The weekly default cannot be voted — propose or vote another bundle to override it.', votes: proposal.votes });
-    }
+    // The house pitch is votable like any other: it is a real candidate on the ballot, not
+    // just a floor. It still loses vote ties to human pitches (see pickWinner), so backing
+    // it means backing it outright rather than handing it a tie.
     const hasVoted = proposal.voters.includes(username);
     if(hasVoted){ proposal.voters = proposal.voters.filter((v:string)=>v!==username); proposal.votes = Math.max(0, proposal.votes-1); }
     else { proposal.voters.push(username); proposal.votes += 1; }
