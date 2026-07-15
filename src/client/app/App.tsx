@@ -1154,7 +1154,10 @@ function App() {
                 key={key}
                 onClick={() => setCurrentView(key as any)}
                 aria-label={label}
-                className={`flex-1 flex flex-col items-center justify-center gap-0.5 text-[10px] font-semibold ${active ? 'text-black' : 'text-black/50'}`}
+                aria-current={active ? 'page' : undefined}
+                // Inverted active state, matching the desktop rail and the tool buttons.
+                style={active ? { backgroundColor: 'var(--ink)', color: 'var(--paper-bg)' } : undefined}
+                className={`flex-1 flex flex-col items-center justify-center gap-0.5 text-[10px] font-semibold ${active ? '' : 'text-black/50'}`}
               >
                 <Icon className="w-5 h-5" />
                 <span>{label}</span>

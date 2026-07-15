@@ -69,11 +69,13 @@ export const Header: React.FC<HeaderProps> = ({ currentView, setCurrentView }) =
               key={key}
               onClick={() => setCurrentView(key as any)}
               title={label}
-              style={active ? { backgroundColor: '#FDE047' } : undefined}
+              aria-current={active ? 'page' : undefined}
+              // Same inverted-active treatment as the tool and brush buttons.
+              style={active ? { backgroundColor: 'var(--ink)', borderColor: 'var(--paper-bg)', boxShadow: '1px 1px 0 var(--paper-bg)' } : undefined}
               className="pencil-btn flex items-center justify-center rounded-md py-2 outline-none focus:ring-2 focus:ring-black/40"
               aria-label={label}
             >
-              <Icon className="w-5 h-5 flex-shrink-0 text-black" />
+              <Icon className="w-5 h-5 flex-shrink-0" style={{ color: active ? 'var(--paper-bg)' : 'var(--ink)' }} />
             </button>
           );
         })}
