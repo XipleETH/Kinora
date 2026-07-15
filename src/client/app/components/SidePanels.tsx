@@ -325,7 +325,7 @@ export const SidePanels: React.FC<SidePanelsProps> = ({
                 value={brushSize}
                 disabled={disabled}
                 onChange={(e) => setBrushSize(Number(e.target.value))}
-                className="h-12 w-1 accent-white/80 cursor-pointer rotate-180"
+                className="h-12 w-6 accent-white/80 cursor-pointer rotate-180"
                 aria-label="Brush size"
                 style={{ writingMode: 'vertical-lr' }}
               />
@@ -361,7 +361,7 @@ export const SidePanels: React.FC<SidePanelsProps> = ({
                   value={brushSpacing ?? 4}
                   disabled={disabled}
                   onChange={(e) => setBrushSpacing(Number(e.target.value))}
-                  className="h-12 w-1 accent-white/80 cursor-pointer rotate-180"
+                  className="h-12 w-6 accent-white/80 cursor-pointer rotate-180"
                   aria-label="Brush spacing"
                   style={{ writingMode: 'vertical-lr' }}
                 />
@@ -400,7 +400,7 @@ export const SidePanels: React.FC<SidePanelsProps> = ({
                   value={Math.round((brushOpacity ?? 1) * 100)}
                   disabled={disabled}
                   onChange={(e) => setBrushOpacity(Number(e.target.value) / 100)}
-                  className="h-12 w-1 accent-white/80 cursor-pointer rotate-180"
+                  className="h-12 w-6 accent-white/80 cursor-pointer rotate-180"
                   aria-label="Brush opacity"
                   style={{ writingMode: 'vertical-lr' }}
                 />

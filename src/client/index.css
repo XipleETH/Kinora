@@ -105,6 +105,13 @@ html, body {
 	backdrop-filter: none !important;
 }
 
+/* Sliders must own the touch gesture. With the default touch-action the browser claims a drag
+   that starts on the slider as a page pan, so on iPad dragging scrolled the page instead of
+   moving the thumb (tapping still worked, since a tap is never a pan). */
+.pencil-theme input[type=range] {
+	touch-action: none;
+}
+
 /* Range inputs: slim dark track & pencil thumb */
 .pencil-theme input[type=range]::-webkit-slider-runnable-track {
 	height: 4px;
