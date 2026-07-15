@@ -6,6 +6,15 @@ import { ChevronLeft, ChevronRight } from 'lucide-react';
 interface VideoPlayerProps { frames: Frame[]; fitHeight?: boolean }
 interface WeekBundle { palette: string[]; director?: string }
 
+// Past weeks are frozen history, so their bundles survive reloads here.
+const BUNDLE_CACHE_KEY = 'kinoraWeekBundles';
+const readBundleCache = (): Record<number, WeekBundle> => {
+  try { return JSON.parse(localStorage.getItem(BUNDLE_CACHE_KEY) || '{}'); } catch { return {}; }
+};
+const writeBundleCache = (b: Record<number, WeekBundle>) => {
+  try { localStorage.setItem(BUNDLE_CACHE_KEY, JSON.stringify(b)); } catch { /* quota / private mode */ }
+};
+
 // Group frames by paletteWeek (placeholder property)
 export const VideoPlayer: React.FC<VideoPlayerProps> = ({ frames, fitHeight }) => {
   const groups = useMemo(()=>{
@@ -25,18 +34,26 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({ frames, fitHeight }) =
   const prev = weekIndex>0? groups[weekIndex-1]: null;
   const current = weekIndex>=0? groups[weekIndex]: null;
   const next = (weekIndex>=0 && weekIndex < groups.length-1)? groups[weekIndex+1]: null;
-  const recentWeeks = groups.slice(-8); // bottom selector (up to 8)
+  // Every week that has frames gets a clapper. The library column scrolls, so the list can grow
+  // indefinitely; capping it would silently hide old weeks with nothing to hint they exist.
+  const recentWeeks = groups;
 
   // Each week's palette + director for the picker, from the same authoritative bundle the
   // gallery uses, so a past week shows the config it was actually drawn with.
-  const [bundles,setBundles] = useState<Record<number,WeekBundle>>({});
+  // A finished week's bundle never changes again, so it is cached: without this, opening Play
+  // fired one request per week — fine at 8 weeks, hundreds once the library stopped capping.
+  // The newest week is always refetched, being the only one still live.
+  const [bundles,setBundles] = useState<Record<number,WeekBundle>>(()=> readBundleCache());
   const weekKey = recentWeeks.map(g=>g.week).join(',');
   useEffect(()=>{
     if(!weekKey) return;
     let cancel = false;
     (async ()=>{
       const weeks = weekKey.split(',').map(Number);
-      const results = await Promise.all(weeks.map(async w => {
+      const cached = readBundleCache();
+      const newest = Math.max(...weeks);
+      const missing = weeks.filter(w => w === newest || !cached[w]);
+      const results = await Promise.all(missing.map(async w => {
         try {
           const r = await fetch(`/api/week-bundle?week=${w}`);
           if(!r.ok) return null;
@@ -53,7 +70,11 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({ frames, fitHeight }) =
           director: res.bundle.director || undefined,
         };
       }
-      if(Object.keys(next).length) setBundles(prevB=>({ ...prevB, ...next }));
+      if(Object.keys(next).length){
+        const merged = { ...cached, ...next };
+        setBundles(merged);
+        writeBundleCache(merged);
+      }
     })();
     return ()=>{ cancel = true; };
   },[weekKey]);

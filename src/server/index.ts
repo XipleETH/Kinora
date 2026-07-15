@@ -1307,6 +1307,10 @@ router.get('/api/list-frames', async (req, res) => {
     let approxBytes = 0;
     // Pre-calculate slice boundaries (we still need to know total after filtering to expose totalPages)
     const accepted: any[] = [];
+    // The viewer is the same for the whole request: resolving it per frame cost one Reddit API
+    // round-trip per frame, which is what made this endpoint scale with history length.
+    let me: string | undefined;
+    try { me = await reddit.getCurrentUsername(); } catch { /* anon */ }
     for (const key of frameKeys) {
       try {
         const frameData = await loadFrame(postId, key);
@@ -1316,10 +1320,9 @@ router.get('/api/list-frames', async (req, res) => {
         const vraw = await redis.get(VOTES_KEY(postId, key));
         let votesUp = 0, votesDown = 0; let myVote: -1|0|1 = 0;
         if (vraw) { try { const v = JSON.parse(vraw); votesUp = v.up||0; votesDown = v.down||0; } catch{} }
-        try {
-          const me = await reddit.getCurrentUsername();
-          if (me && vraw) { const v = JSON.parse(vraw); const by = v.by||{}; myVote = by[me] ?? 0; }
-        } catch {}
+        if (me && vraw) {
+          try { const v = JSON.parse(vraw); const by = v.by||{}; myVote = by[me] ?? 0; } catch {}
+        }
         // week derivation
         let week: number;
         if (typeof frameData.week === 'number') {
