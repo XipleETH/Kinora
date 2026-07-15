@@ -1132,7 +1132,7 @@ function App() {
   {/* Upload debug panels removed */}
 
         {currentView === 'video' && (
-          <VideoPlayer frames={frames} />
+          <VideoPlayer frames={frames} fitHeight={!isMobile} />
         )}
 
         {currentView === 'voting' && (

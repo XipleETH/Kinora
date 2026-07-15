@@ -214,6 +214,16 @@ html, body {
 .clapper-info-line span { line-height: 1.1; }
 .clapper-palette-mini { display: flex; gap: 4px; }
 .clapper-palette-mini span { width: 14px; height: 14px; border: 2px solid var(--ink); border-radius: 4px; box-shadow: 1px 1px 0 var(--ink); }
+/* Compact clapper used as the video week picker: palette + week + director, nothing else. */
+.clapper-mini { width: 116px; padding: 5px 6px 6px 6px; cursor: pointer; text-align: left; transition: transform .12s ease, box-shadow .12s ease; }
+.clapper-mini:hover { transform: translate(-1px,-1px); box-shadow: 3px 3px 0 var(--ink), 5px 5px 0 rgba(0,0,0,0.35); }
+.clapper-mini:active { transform: translate(0,0); box-shadow: 2px 2px 0 var(--ink), 4px 4px 0 rgba(0,0,0,0.35); }
+.clapper-mini-stripes { display: flex; width: 100%; height: 12px; margin-bottom: 5px; border: 2px solid var(--ink); border-radius: 4px; overflow: hidden; box-shadow: 1px 1px 0 var(--ink); }
+.clapper-mini-meta { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.clapper-mini-week { font-size: 11px; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase; line-height: 1.1; }
+.clapper-mini .clapper-director { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.clapper-mini.is-active { background: var(--ink); color: var(--paper-bg); }
+
 .clapper-grid { display: grid; grid-template-columns: repeat(auto-fill,minmax(160px,1fr)); gap: 10px; }
 .clapper-frame-card { border: 2px solid var(--ink); border-radius: 10px; background: var(--paper-bg); box-shadow: 1px 1px 0 var(--ink); overflow: hidden; position: relative; }
 .clapper-frame-card:hover { transform: translate(-2px,-2px); box-shadow: 3px 3px 0 var(--ink); }

@@ -1,12 +1,13 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Frame } from '../App';
 import { WeekVideo } from './WeekVideo';
 import { ChevronLeft, ChevronRight } from 'lucide-react';
 
-interface VideoPlayerProps { frames: Frame[]; }
+interface VideoPlayerProps { frames: Frame[]; fitHeight?: boolean }
+interface WeekBundle { palette: string[]; director?: string }
 
 // Group frames by paletteWeek (placeholder property)
-export const VideoPlayer: React.FC<VideoPlayerProps> = ({ frames }) => {
+export const VideoPlayer: React.FC<VideoPlayerProps> = ({ frames, fitHeight }) => {
   const groups = useMemo(()=>{
     const map = new Map<number, Frame[]>();
     for(const f of frames){
@@ -25,26 +26,97 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({ frames }) => {
   const current = weekIndex>=0? groups[weekIndex]: null;
   const next = (weekIndex>=0 && weekIndex < groups.length-1)? groups[weekIndex+1]: null;
   const recentWeeks = groups.slice(-8); // bottom selector (up to 8)
+
+  // Each week's palette + director for the picker, from the same authoritative bundle the
+  // gallery uses, so a past week shows the config it was actually drawn with.
+  const [bundles,setBundles] = useState<Record<number,WeekBundle>>({});
+  const weekKey = recentWeeks.map(g=>g.week).join(',');
+  useEffect(()=>{
+    if(!weekKey) return;
+    let cancel = false;
+    (async ()=>{
+      const weeks = weekKey.split(',').map(Number);
+      const results = await Promise.all(weeks.map(async w => {
+        try {
+          const r = await fetch(`/api/week-bundle?week=${w}`);
+          if(!r.ok) return null;
+          const j = await r.json();
+          return { week: w, bundle: j };
+        } catch { return null; }
+      }));
+      if(cancel) return;
+      const next: Record<number,WeekBundle> = {};
+      for(const res of results){
+        if(!res || !res.bundle) continue;
+        next[res.week] = {
+          palette: Array.isArray(res.bundle.palette) ? res.bundle.palette.slice(0,6) : [],
+          director: res.bundle.director || undefined,
+        };
+      }
+      if(Object.keys(next).length) setBundles(prevB=>({ ...prevB, ...next }));
+    })();
+    return ()=>{ cancel = true; };
+  },[weekKey]);
+
+  // Desktop: hand the player the height left between it and the picker, so the picker stays on
+  // screen instead of being pushed below the fold by the player's fixed 9:16 height. Mobile keeps
+  // its natural size — scrolling a phone to reach the picker is expected.
+  const videoRowRef = useRef<HTMLDivElement>(null);
+  const pickerRef = useRef<HTMLDivElement>(null);
+  const [videoMaxH,setVideoMaxH] = useState<number|undefined>(undefined);
+  useEffect(()=>{
+    if(!fitHeight){ setVideoMaxH(undefined); return; }
+    const update = ()=>{
+      const row = videoRowRef.current;
+      if(!row) return;
+      const top = row.getBoundingClientRect().top;
+      const pickerH = pickerRef.current?.getBoundingClientRect().height ?? 0;
+      // The player's own caption + frame count live inside the row, hence the extra slack.
+      setVideoMaxH(Math.max(220, window.innerHeight - top - pickerH - 96));
+    };
+    update();
+    window.addEventListener('resize', update);
+    return ()=> window.removeEventListener('resize', update);
+  },[fitHeight, weekKey]);
+
   if(groups.length===0){
     return <div className="text-center py-12 text-white/60">No frames yet</div>;
   }
   return (
     <div className="space-y-6">
       <h2 className="text-center text-3xl font-bold text-white">Weekly Carousel</h2>
-      <div className="flex items-center justify-center gap-4">
-        <button onClick={()=> prev && setFocusWeek(prev.week)} disabled={!prev} className={`p-2 rounded-full border border-white/20 text-white/70 hover:text-white hover:bg-white/10 ${!prev? 'opacity-30 cursor-not-allowed':''}`}><ChevronLeft className="w-5 h-5"/></button>
-        <div className="flex gap-8 flex-wrap justify-center max-w-full">
-          {prev && <div className="hidden md:block"><WeekVideo frames={prev.frames} title={`Week ${prev.week}`}/></div>}
-          {current && <WeekVideo frames={current.frames} title={`Week ${current.week}`}/>}
-          {next && <div className="hidden md:block"><WeekVideo frames={next.frames} title={`Week ${next.week}`}/></div>}
-        </div>
-        <button onClick={()=> next && setFocusWeek(next.week)} disabled={!next} className={`p-2 rounded-full border border-white/20 text-white/70 hover:text-white hover:bg-white/10 ${!next? 'opacity-30 cursor-not-allowed':''}`}><ChevronRight className="w-5 h-5"/></button>
+      {/* One week at a time — the chevrons and the picker below move between weeks. */}
+      <div ref={videoRowRef} className="flex items-center justify-center gap-4">
+        <button onClick={()=> prev && setFocusWeek(prev.week)} disabled={!prev} aria-label="Previous week" className={`p-2 rounded-full border border-white/20 text-white/70 hover:text-white hover:bg-white/10 ${!prev? 'opacity-30 cursor-not-allowed':''}`}><ChevronLeft className="w-5 h-5"/></button>
+        {current && <WeekVideo frames={current.frames} title={`Week ${current.week}`} maxHeight={videoMaxH}/>}
+        <button onClick={()=> next && setFocusWeek(next.week)} disabled={!next} aria-label="Next week" className={`p-2 rounded-full border border-white/20 text-white/70 hover:text-white hover:bg-white/10 ${!next? 'opacity-30 cursor-not-allowed':''}`}><ChevronRight className="w-5 h-5"/></button>
       </div>
-      <div className="pt-2">
+      <div ref={pickerRef} className="pt-2">
         <div className="flex flex-wrap gap-2 justify-center">
-          {recentWeeks.map(g=> (
-            <button key={g.week} onClick={()=>setFocusWeek(g.week)} className={`px-3 py-1 rounded-full text-xs border transition ${g.week===focusWeek? 'bg-white/30 text-white border-white/60':'bg-white/10 text-white/70 border-white/20 hover:bg-white/20'}`}>Week {g.week}<span className="ml-1 text-white/50">({g.frames.length})</span></button>
-          ))}
+          {recentWeeks.map(g=> {
+            const b = bundles[g.week];
+            const palette = b?.palette?.length ? b.palette : [];
+            const active = g.week===focusWeek;
+            return (
+              <button
+                key={g.week}
+                onClick={()=>setFocusWeek(g.week)}
+                aria-pressed={active}
+                aria-label={`Week ${g.week}`}
+                className={`clapper clapper-mini ${active? 'is-active':''}`}
+              >
+                <div className="clapper-mini-stripes">
+                  {palette.length
+                    ? palette.map((c,i)=> <div key={i} className="clapper-stripe-tile" style={{ background: c }} />)
+                    : <div className="clapper-stripe-tile" style={{ background: 'var(--hatch-light)', opacity: 0.3 }} />}
+                </div>
+                <div className="clapper-mini-meta">
+                  <span className="clapper-mini-week">Week {g.week}</span>
+                  <span className="clapper-director">{b?.director ? 'u/'+b.director : '—'}</span>
+                </div>
+              </button>
+            );
+          })}
         </div>
       </div>
     </div>
