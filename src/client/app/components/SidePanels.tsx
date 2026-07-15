@@ -20,6 +20,37 @@ const ClapperClosed: React.FC<{ className?: string }> = ({ className }) => (
 
 export type PanelKey = 'actions' | 'tools' | 'brushSize' | 'brushMode' | 'palette';
 
+// Caption under a control. Lives in a min-w-0 flex column so it truncates instead of
+// widening the panel, and never intercepts the click meant for the button above it.
+const Caption: React.FC<{ children: React.ReactNode }> = ({ children }) => (
+  <span className="block w-full text-center truncate text-[8px] leading-none tracking-tight text-black/75 select-none pointer-events-none">
+    {children}
+  </span>
+);
+
+// Short captions for brush presets: full names ("Watercolor Wash") don't fit a 4-up row.
+const brushCaptions: Record<string, string> = {
+  ink: 'Ink',
+  'acrylic-paint': 'Acrylic',
+  'watercolor-wash': 'Water',
+  airbrush: 'Airbrush',
+  pencil: 'Pencil',
+  marker: 'Marker',
+  charcoal: 'Charcoal',
+  'spray-fine': 'Spray',
+  'spray-drip': 'Drip',
+  'splatter-big': 'Splatter',
+  'smudge-soft': 'Smudge',
+  'calli-fine': 'Calli',
+  'calli-broad': 'Broad',
+  'glow-soft': 'Glow',
+  'pixel-1': 'Pixel',
+  'pixel-rect': 'Pixel R',
+  'multi-stars': 'Stars',
+  'multi-leaves': 'Leaves',
+};
+const brushCaption = (p: BrushPreset) => brushCaptions[p.id] ?? p.name.split(' ')[0];
+
 interface SidePanelsProps {
   side: 'left' | 'right';
   toggleSide: () => void;
@@ -76,13 +107,13 @@ const PanelWrapper: React.FC<{
   <div className="flex items-center justify-between px-2.5 py-1.5 border-b-2 border-black/70">
       <span className="text-white/90 text-[10px] font-semibold tracking-wide flex items-center gap-1">{title}</span>
       <div className="flex items-center gap-0.5">
-  <button onClick={onUp} disabled={!canUp} className="p-1 rounded-md pencil-btn disabled:opacity-30" aria-label="Mover arriba">
+  <button onClick={onUp} disabled={!canUp} className="p-1 rounded-md pencil-btn disabled:opacity-30" aria-label="Move panel up" title="Move panel up">
           <MoveUp className="w-3 h-3" />
         </button>
-  <button onClick={onDown} disabled={!canDown} className="p-1 rounded-md pencil-btn disabled:opacity-30" aria-label="Mover abajo">
+  <button onClick={onDown} disabled={!canDown} className="p-1 rounded-md pencil-btn disabled:opacity-30" aria-label="Move panel down" title="Move panel down">
           <MoveDown className="w-3 h-3" />
         </button>
-  <button onClick={onToggleSide} className="p-1 rounded-md pencil-btn" aria-label="Cambiar lado" title="Cambiar lado">
+  <button onClick={onToggleSide} className="p-1 rounded-md pencil-btn" aria-label="Switch side" title="Switch side">
           {side === 'right' ? <ChevronLeft className="w-3.5 h-3.5" /> : <ChevronRight className="w-3.5 h-3.5" />}
         </button>
       </div>
@@ -147,7 +178,7 @@ export const SidePanels: React.FC<SidePanelsProps> = ({
       return (
         <PanelWrapper key={key} title="Actions" {...common}>
           <div className="flex flex-col gap-2.5">
-            <div className="flex items-center justify-center gap-2.5">
+            <div className="flex items-start justify-center gap-1.5">
               {(() => {
                 // Determine button state: finalize (artist), start (idle), wait (someone else is artist)
                 const state: 'finalize' | 'start' | 'wait' = isArtist ? 'finalize' : (canStart ? 'start' : 'wait');
@@ -172,27 +203,40 @@ export const SidePanels: React.FC<SidePanelsProps> = ({
                 const ringCls = state === 'start' ? 'focus:ring-black/40' : 'focus:ring-white/50';
                 const Icon = state === 'finalize' ? ClapperClosed : state === 'start' ? ClapperOpen : Clock;
                 const iconCls = state === 'start' ? 'text-black' : 'text-white';
+                const caption = state === 'finalize' ? 'Finish' : state === 'start' ? 'Start' : 'Wait';
                 return (
-                  <button
-                    onClick={onClick}
-                    aria-label={aria}
-                    title={title}
-                    className={`p-2 rounded-full pencil-btn ${textCls} transition focus:outline-none focus:ring-2 ${ringCls} ${cls}`}
-                    disabled={isDisabled}
-                  >
-                    <Icon className={`w-4 h-4 ${iconCls}`} />
-                  </button>
+                  <div className="flex flex-col items-center gap-1 flex-1 min-w-0">
+                    <button
+                      onClick={onClick}
+                      aria-label={aria}
+                      title={title}
+                      className={`p-2 rounded-full pencil-btn ${textCls} transition focus:outline-none focus:ring-2 ${ringCls} ${cls}`}
+                      disabled={isDisabled}
+                    >
+                      <Icon className={`w-4 h-4 ${iconCls}`} />
+                    </button>
+                    <Caption>{caption}</Caption>
+                  </div>
                 );
               })()}
-              <button onClick={() => !disabled && onSave()} disabled={disabled} aria-label="Save Frame" className="p-2 rounded-full pencil-btn pencil-fill-emerald disabled:opacity-40 transition">
-                <Save className="w-4 h-4" />
-              </button>
-              <button onClick={() => !disabled && onUndo?.()} disabled={disabled} aria-label="Undo" title="Undo" className="p-2 rounded-full pencil-btn pencil-fill-indigo disabled:opacity-40 transition">
-                <Undo2 className="w-4 h-4" />
-              </button>
-              <button onClick={() => !disabled && onClear()} disabled={disabled} aria-label="Clear Canvas" className="p-2 rounded-full pencil-btn pencil-fill-red disabled:opacity-40 transition">
-                <Trash2 className="w-4 h-4" />
-              </button>
+              <div className="flex flex-col items-center gap-1 flex-1 min-w-0">
+                <button onClick={() => !disabled && onSave()} disabled={disabled} aria-label="Save Frame" title="Save Frame" className="p-2 rounded-full pencil-btn pencil-fill-emerald disabled:opacity-40 transition">
+                  <Save className="w-4 h-4" />
+                </button>
+                <Caption>Save</Caption>
+              </div>
+              <div className="flex flex-col items-center gap-1 flex-1 min-w-0">
+                <button onClick={() => !disabled && onUndo?.()} disabled={disabled} aria-label="Undo" title="Undo" className="p-2 rounded-full pencil-btn pencil-fill-indigo disabled:opacity-40 transition">
+                  <Undo2 className="w-4 h-4" />
+                </button>
+                <Caption>Undo</Caption>
+              </div>
+              <div className="flex flex-col items-center gap-1 flex-1 min-w-0">
+                <button onClick={() => !disabled && onClear()} disabled={disabled} aria-label="Clear Canvas" title="Clear Canvas" className="p-2 rounded-full pencil-btn pencil-fill-red disabled:opacity-40 transition">
+                  <Trash2 className="w-4 h-4" />
+                </button>
+                <Caption>Clear</Caption>
+              </div>
             </div>
             {/* Hidden: timer and username moved to top bar; keep code for easy re-enable */}
             {false && typeof timeLeft === 'number' && (
@@ -211,23 +255,26 @@ export const SidePanels: React.FC<SidePanelsProps> = ({
     if (key === 'tools') {
       return (
         <PanelWrapper key={key} title="Tools" {...common}>
-          <div className="flex flex-wrap gap-2 justify-center">
-            {['draw', 'erase', 'fill'].map((t) => {
+          <div className="flex gap-1.5 justify-center">
+            {(['draw', 'erase', 'fill'] as const).map((t) => {
               const isActive = tool === t;
+              const caption = t === 'draw' ? 'Draw' : t === 'erase' ? 'Erase' : 'Fill';
               return (
-                <button
-                  key={t}
-                  onClick={() => setTool(t as any)}
-                  disabled={disabled}
-                  aria-label={t}
-                  title={t}
-                  className={`p-1.5 rounded-full pencil-btn transition flex items-center justify-center disabled:opacity-40`}
-                  style={isActive ? { backgroundColor: 'var(--ink)', borderColor: 'var(--paper-bg)', boxShadow: '1px 1px 0 var(--paper-bg)' } : {}}
-                >
-                  {t === 'draw' && <Pencil className="w-4 h-4" style={isActive ? { color: 'var(--paper-bg)' } : {}} />}
-                  {t === 'erase' && <Eraser className="w-4 h-4" style={isActive ? { color: 'var(--paper-bg)' } : {}} />}
-                  {t === 'fill' && <PaintBucket className="w-4 h-4" style={isActive ? { color: 'var(--paper-bg)' } : {}} />}
-                </button>
+                <div key={t} className="flex flex-col items-center gap-1 flex-1 min-w-0">
+                  <button
+                    onClick={() => setTool(t)}
+                    disabled={disabled}
+                    aria-label={caption}
+                    title={caption}
+                    className={`p-1.5 rounded-full pencil-btn transition flex items-center justify-center disabled:opacity-40`}
+                    style={isActive ? { backgroundColor: 'var(--ink)', borderColor: 'var(--paper-bg)', boxShadow: '1px 1px 0 var(--paper-bg)' } : {}}
+                  >
+                    {t === 'draw' && <Pencil className="w-4 h-4" style={isActive ? { color: 'var(--paper-bg)' } : {}} />}
+                    {t === 'erase' && <Eraser className="w-4 h-4" style={isActive ? { color: 'var(--paper-bg)' } : {}} />}
+                    {t === 'fill' && <PaintBucket className="w-4 h-4" style={isActive ? { color: 'var(--paper-bg)' } : {}} />}
+                  </button>
+                  <Caption>{caption}</Caption>
+                </div>
               );
             })}
           </div>
@@ -260,7 +307,7 @@ export const SidePanels: React.FC<SidePanelsProps> = ({
         <PanelWrapper key={key} title="Stroke" {...common}>
           <div className="flex flex-row justify-between gap-1">
             {/* Size column */}
-            <div className="flex flex-col items-center gap-1 w-1/3">
+            <div className="flex flex-col items-center gap-1 w-1/3 min-w-0">
               <button
                 onClick={() => !disabled && setBrushSize(clamp(brushSize + 2, 1, 50))}
                 disabled={disabled}
@@ -291,11 +338,12 @@ export const SidePanels: React.FC<SidePanelsProps> = ({
               >
                 <IconShrink className="w-4 h-4" />
               </button>
+              <Caption>Size</Caption>
               {/** numeric label removed per request */}
             </div>
             {/* Spacing column */}
             {setBrushSpacing && (
-              <div className="flex flex-col items-center gap-1 w-1/3">
+              <div className="flex flex-col items-center gap-1 w-1/3 min-w-0">
                 <button
                   onClick={() => !disabled && setBrushSpacing(clamp((brushSpacing ?? 4) + 1, 1, 30))}
                   disabled={disabled}
@@ -326,12 +374,13 @@ export const SidePanels: React.FC<SidePanelsProps> = ({
                 >
                   <IconSpacingLess className="w-4 h-4" />
                 </button>
+                <Caption>Spacing</Caption>
                 {/** numeric label removed per request */}
               </div>
             )}
             {/* Opacity column */}
             {setBrushOpacity && (
-              <div className="flex flex-col items-center gap-1 w-1/3">
+              <div className="flex flex-col items-center gap-1 w-1/3 min-w-0">
                 <button
                   onClick={() => {
                     if (disabled) return; const current = brushOpacity ?? 1; const next = clamp(current + 0.05, 0.05, 1); setBrushOpacity(next);
@@ -366,6 +415,7 @@ export const SidePanels: React.FC<SidePanelsProps> = ({
                 >
                   <IconOpacityLow className="w-4 h-4" />
                 </button>
+                <Caption>Opacity</Caption>
                 {/** numeric label removed per request */}
               </div>
             )}
@@ -438,7 +488,7 @@ export const SidePanels: React.FC<SidePanelsProps> = ({
       );
       return (
         <PanelWrapper key={key} title="Brushes" {...common}>
-          <div className="flex flex-nowrap gap-2 justify-between">
+          <div className="flex flex-nowrap gap-1 justify-between">
             {presets.map(p => {
               const active = p.id === brushPresetId;
               const Icon = p.id === 'ink'
@@ -455,22 +505,24 @@ export const SidePanels: React.FC<SidePanelsProps> = ({
                           ? MarkerIcon
                           : CharcoalIcon;
               return (
-                <button
-                  key={p.id}
-                  disabled={disabled}
-                  onClick={() => {
-                    setBrushPresetId?.(p.id);
-                    setBrushSize(p.size);
-                    if (setBrushSpacing) setBrushSpacing(p.spacing ?? 4);
-                    if (setBrushOpacity) setBrushOpacity(p.opacity ?? 1);
-                  }}
-                  className={`p-1 rounded-full pencil-btn flex items-center justify-center transition disabled:opacity-40`}
-                  style={active ? { backgroundColor: 'var(--ink)', borderColor: 'var(--paper-bg)', boxShadow: '1px 1px 0 var(--paper-bg)' } : {}}
-                  aria-label={p.name}
-                  title={p.name}
-                >
-                  <Icon active={active} />
-                </button>
+                <div key={p.id} className="flex flex-col items-center gap-1 flex-1 min-w-0">
+                  <button
+                    disabled={disabled}
+                    onClick={() => {
+                      setBrushPresetId?.(p.id);
+                      setBrushSize(p.size);
+                      if (setBrushSpacing) setBrushSpacing(p.spacing ?? 4);
+                      if (setBrushOpacity) setBrushOpacity(p.opacity ?? 1);
+                    }}
+                    className={`p-1 rounded-full pencil-btn flex items-center justify-center transition disabled:opacity-40`}
+                    style={active ? { backgroundColor: 'var(--ink)', borderColor: 'var(--paper-bg)', boxShadow: '1px 1px 0 var(--paper-bg)' } : {}}
+                    aria-label={p.name}
+                    title={p.name}
+                  >
+                    <Icon active={active} />
+                  </button>
+                  <Caption>{brushCaption(p)}</Caption>
+                </div>
               );
             })}
           </div>
